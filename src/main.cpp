@@ -28,6 +28,7 @@
 #include "net/Server.h"
 #include "render/Mesh.h"
 #include "render/Renderer.h"
+#include "ui/Menu.h"
 
 namespace {
 
@@ -714,6 +715,303 @@ int runGen(const std::string& seedStr) {
     return 0;
 }
 
+int runGame(const std::string& serverHostArg, uint16_t port) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+        std::printf("[ot] SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window* window = SDL_CreateWindow(
+        "OpenTournament",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        1280, 720,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window) {
+        std::printf("[ot] SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+#if !OT_PLATFORM_ANDROID
+    SDL_SetRelativeMouseMode(SDL_TRUE);
+#endif
+
+    ot::Renderer renderer;
+    if (!renderer.init(window)) {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    ot::Input input;
+    input.init();
+
+    ot::Level level;
+    level.build();
+
+    ot::Player player;
+    player.spawn(glm::vec3(0.0f, 2.0f, 12.0f), 0.0f);
+
+    ot::Weapon weapon;
+
+    const bool isClient = !serverHostArg.empty();
+    std::string host = serverHostArg;
+    ot::Client client(player);
+    if (isClient) {
+        if (host == "127.0.0.1") {
+            const std::string fromFile = readServerIpFile();
+            if (!fromFile.empty()) {
+                host = fromFile;
+            }
+        }
+        client.connect(host.c_str(), port);
+        SDL_Log("[ot] client mode, server host resolved: %s:%u", host.c_str(), port);
+    }
+
+    std::vector<ot::Mesh> remoteBoxes;
+    for (int i = 0; i < 8; ++i) {
+        ot::Mesh mesh;
+        mesh.upload(buildCenteredBox(ot::Player::kHalfWidth, ot::Player::kHalfHeight,
+                                     ot::Player::kHalfWidth, kPlayerColors[i]));
+        remoteBoxes.push_back(mesh);
+    }
+
+    ot::Mesh crosshairMesh;
+    ot::Mesh tracerMesh;
+    ot::Mesh hudMesh;
+
+    const float baseFov = glm::radians(70.0f);
+    const float aimFov = glm::radians(45.0f);
+
+    Uint64 lastCounter = SDL_GetPerformanceCounter();
+    const double counterFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
+
+    bool running = true;
+    bool mapApplied = false;
+    while (running) {
+        const Uint64 now = SDL_GetPerformanceCounter();
+        float dt = static_cast<float>(static_cast<double>(now - lastCounter) / counterFrequency);
+        lastCounter = now;
+        if (dt > 0.1f) {
+            dt = 0.1f;
+        }
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            } else if (event.type == SDL_KEYDOWN &&
+                       event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
+                running = false;
+            }
+            input.handleEvent(event);
+        }
+
+        int width = 0;
+        int height = 0;
+        SDL_GetWindowSize(window, &width, &height);
+        if (height > 0) {
+            player.camera().aspect = static_cast<float>(width) / static_cast<float>(height);
+        }
+
+        if (isClient) {
+            const glm::vec2 look = input.lookDelta(dt);
+            player.camera().rotate(look.x, look.y);
+
+            const glm::vec2 move = input.moveAxis();
+            ot::PlayerInput pi;
+            pi.moveX = move.x;
+            pi.moveY = move.y;
+            pi.yaw = player.camera().yaw;
+            pi.pitch = player.camera().pitch;
+            pi.fire = input.fireHeld();
+            pi.aim = input.aimHeld();
+            pi.jump = input.jumpHeld();
+
+            client.update(dt, pi, level.world());
+
+            if (client.mapReceived() && !mapApplied) {
+                ot::map::GenParams params;
+                std::string name;
+                if (ot::map::parseOtMapText(client.mapText(), params, name)) {
+                    const ot::map::GeneratedMap generated = ot::map::generate(params);
+                    level.buildFromMap(generated);
+                    SDL_Log("[ot] applied map %s (seed %u)\n", name.c_str(), params.seed);
+                }
+                mapApplied = true;
+            }
+
+            weapon.update(dt, input, player.camera(), level.world());
+        } else {
+            player.update(dt, input, level.world());
+            weapon.update(dt, input, player.camera(), level.world());
+        }
+
+        player.camera().fov = glm::mix(baseFov, aimFov, weapon.aimFactor());
+
+        renderer.beginFrame();
+
+        const glm::mat4 viewProj = player.camera().viewProj();
+        if (mapApplied) {
+            renderer.draw(level.mapMesh(), viewProj);
+        } else {
+            renderer.draw(level.floorMesh(), viewProj);
+            renderer.draw(level.boxMesh(), viewProj);
+        }
+
+        if (isClient) {
+            for (const auto& remote : client.remotePlayers()) {
+                if (remote.id == 0 || remote.id == client.localId()) {
+                    continue;
+                }
+                const uint32_t idx = (remote.id - 1) % 8;
+                const glm::mat4 model = glm::translate(glm::mat4(1.0f), remote.position);
+                renderer.draw(remoteBoxes[idx], viewProj * model);
+            }
+        }
+
+        const auto& tracers = weapon.tracers();
+        if (!tracers.empty()) {
+            std::vector<float> lineVerts;
+            const glm::vec3 tracerColor(0.35f, 0.85f, 1.0f);
+            for (const auto& t : tracers) {
+                pushVertex(lineVerts, t.start, tracerColor);
+                pushVertex(lineVerts, t.end, tracerColor);
+            }
+            tracerMesh.uploadLines(lineVerts);
+            renderer.drawLines(tracerMesh, viewProj);
+        }
+
+        const float aim = weapon.aimFactor();
+        const float crosshairSize = 1.0f - 0.35f * aim;
+        const glm::vec3 crosshairColor = weapon.hitFlash()
+            ? glm::vec3(1.0f, 0.9f, 0.2f)
+            : glm::vec3(0.2f, 1.0f, 0.4f);
+        crosshairMesh.upload(buildCrosshair(crosshairSize, crosshairColor));
+        renderer.drawOverlay(crosshairMesh);
+
+        if (isClient && client.isConnected()) {
+            const float fraction = static_cast<float>(client.localHealth()) /
+                                   static_cast<float>(ot::net::kMaxHealth);
+            hudMesh.upload(buildHealthBar(fraction));
+            renderer.drawOverlay(hudMesh);
+        }
+
+        renderer.endFrame();
+    }
+
+    client.disconnect();
+    for (auto& mesh : remoteBoxes) {
+        mesh.destroy();
+    }
+    crosshairMesh.destroy();
+    tracerMesh.destroy();
+    hudMesh.destroy();
+    level.destroy();
+    input.shutdown();
+    renderer.shutdown();
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
+
+enum class MenuResult { Quit, PlayOffline, JoinServer, GenerateMap };
+
+int runMenu() {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+        std::printf("[ot] SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_Window* window = SDL_CreateWindow(
+        "OpenTournament",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        1280, 720,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window) {
+        std::printf("[ot] SDL_CreateWindow failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    ot::Renderer renderer;
+    if (!renderer.init(window)) {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return 1;
+    }
+
+    ot::Input input;
+    input.init();
+    SDL_StartTextInput();
+
+    ot::Menu menu;
+    menu.reset();
+    ot::Mesh menuMesh;
+
+    MenuResult result = MenuResult::Quit;
+    std::string ip;
+
+    Uint64 lastCounter = SDL_GetPerformanceCounter();
+    const double counterFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
+
+    bool running = true;
+    while (running) {
+        const Uint64 now = SDL_GetPerformanceCounter();
+        float dt = static_cast<float>(static_cast<double>(now - lastCounter) / counterFrequency);
+        lastCounter = now;
+        if (dt > 0.1f) {
+            dt = 0.1f;
+        }
+        (void)dt;
+
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+                result = MenuResult::Quit;
+            }
+            const ot::MenuAction action = menu.handleEvent(event);
+            if (action == ot::MenuAction::Quit) {
+                running = false;
+                result = MenuResult::Quit;
+            } else if (action == ot::MenuAction::PlayOffline) {
+                running = false;
+                result = MenuResult::PlayOffline;
+            } else if (action == ot::MenuAction::JoinServer) {
+                ip = menu.serverIp();
+                running = false;
+                result = MenuResult::JoinServer;
+            } else if (action == ot::MenuAction::GenerateMap) {
+                running = false;
+                result = MenuResult::GenerateMap;
+            }
+            input.handleEvent(event);
+        }
+
+        std::vector<float> verts;
+        menu.buildVertices(verts);
+        menuMesh.upload(verts);
+
+        renderer.beginFrame();
+        renderer.drawOverlay(menuMesh);
+        renderer.endFrame();
+    }
+
+    SDL_StopTextInput();
+    menuMesh.destroy();
+    input.shutdown();
+    renderer.shutdown();
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    switch (result) {
+        case MenuResult::PlayOffline: return runGame("", ot::net::kDefaultPort);
+        case MenuResult::JoinServer: return runGame(ip, ot::net::kDefaultPort);
+        case MenuResult::GenerateMap: return runGen("");
+        case MenuResult::Quit:
+        default: return 0;
+    }
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -808,200 +1106,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // --- SDL setup for client/offline ---
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
-        std::printf("[ot] SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-    SDL_Window* window = SDL_CreateWindow(
-        "OpenTournament",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1280, 720,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!window) {
-        std::printf("[ot] SDL_CreateWindow failed: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
-    }
-
-#if !OT_PLATFORM_ANDROID
-    SDL_SetRelativeMouseMode(SDL_TRUE);
-#endif
-
-    ot::Renderer renderer;
-    if (!renderer.init(window)) {
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return 1;
-    }
-
-    ot::Input input;
-    input.init();
-
-    ot::Level level;
-    level.build();
-
-    ot::Player player;
-    player.spawn(glm::vec3(0.0f, 2.0f, 12.0f), 0.0f);
-
-    ot::Weapon weapon;
-
-    ot::Client client(player);
+    // --- Client / offline (or main menu on Windows) ---
     if (mode == "client") {
-        if (serverHost == "127.0.0.1") {
-            const std::string fromFile = readServerIpFile();
-            if (!fromFile.empty()) {
-                serverHost = fromFile;
-            }
-        }
-        client.connect(serverHost.c_str(), port);
-        SDL_Log("[ot] client mode, server host resolved: %s:%u", serverHost.c_str(), port);
+        return runGame(serverHost, port);
     }
-    std::vector<ot::Mesh> remoteBoxes;
-    for (int i = 0; i < 8; ++i) {
-        ot::Mesh mesh;
-        mesh.upload(buildCenteredBox(ot::Player::kHalfWidth, ot::Player::kHalfHeight,
-                                     ot::Player::kHalfWidth, kPlayerColors[i]));
-        remoteBoxes.push_back(mesh);
-    }
-
-    ot::Mesh crosshairMesh;
-    ot::Mesh tracerMesh;
-    ot::Mesh hudMesh;
-
-    const float baseFov = glm::radians(70.0f);
-    const float aimFov = glm::radians(45.0f);
-
-    Uint64 lastCounter = SDL_GetPerformanceCounter();
-    const double counterFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
-
-    bool running = true;
-    bool mapApplied = false;
-    while (running) {
-        const Uint64 now = SDL_GetPerformanceCounter();
-        float dt = static_cast<float>(static_cast<double>(now - lastCounter) / counterFrequency);
-        lastCounter = now;
-        if (dt > 0.1f) {
-            dt = 0.1f;
-        }
-
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT) {
-                running = false;
-            } else if (event.type == SDL_KEYDOWN &&
-                       event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                running = false;
-            }
-            input.handleEvent(event);
-        }
-
-        int width = 0;
-        int height = 0;
-        SDL_GetWindowSize(window, &width, &height);
-        if (height > 0) {
-            player.camera().aspect = static_cast<float>(width) / static_cast<float>(height);
-        }
-
-        if (mode == "client") {
-            const glm::vec2 look = input.lookDelta(dt);
-            player.camera().rotate(look.x, look.y);
-
-            const glm::vec2 move = input.moveAxis();
-            ot::PlayerInput pi;
-            pi.moveX = move.x;
-            pi.moveY = move.y;
-            pi.yaw = player.camera().yaw;
-            pi.pitch = player.camera().pitch;
-            pi.fire = input.fireHeld();
-            pi.aim = input.aimHeld();
-            pi.jump = input.jumpHeld();
-
-            client.update(dt, pi, level.world());
-
-            if (client.mapReceived() && !mapApplied) {
-                ot::map::GenParams params;
-                std::string name;
-                if (ot::map::parseOtMapText(client.mapText(), params, name)) {
-                    const ot::map::GeneratedMap generated = ot::map::generate(params);
-                    level.buildFromMap(generated);
-                    SDL_Log("[ot] applied map %s (seed %u)\n", name.c_str(), params.seed);
-                }
-                mapApplied = true;
-            }
-
-            weapon.update(dt, input, player.camera(), level.world());
-        } else {
-            player.update(dt, input, level.world());
-            weapon.update(dt, input, player.camera(), level.world());
-        }
-
-        player.camera().fov = glm::mix(baseFov, aimFov, weapon.aimFactor());
-
-        renderer.beginFrame();
-
-        const glm::mat4 viewProj = player.camera().viewProj();
-        if (mapApplied) {
-            renderer.draw(level.mapMesh(), viewProj);
-        } else {
-            renderer.draw(level.floorMesh(), viewProj);
-            renderer.draw(level.boxMesh(), viewProj);
-        }
-
-        if (mode == "client") {
-            for (const auto& remote : client.remotePlayers()) {
-                if (remote.id == 0 || remote.id == client.localId()) {
-                    continue;
-                }
-                const uint32_t idx = (remote.id - 1) % 8;
-                const glm::mat4 model = glm::translate(glm::mat4(1.0f), remote.position);
-                renderer.draw(remoteBoxes[idx], viewProj * model);
-            }
-        }
-
-        const auto& tracers = weapon.tracers();
-        if (!tracers.empty()) {
-            std::vector<float> lineVerts;
-            const glm::vec3 tracerColor(0.35f, 0.85f, 1.0f);
-            for (const auto& t : tracers) {
-                pushVertex(lineVerts, t.start, tracerColor);
-                pushVertex(lineVerts, t.end, tracerColor);
-            }
-            tracerMesh.uploadLines(lineVerts);
-            renderer.drawLines(tracerMesh, viewProj);
-        }
-
-        // Overlay: crosshair.
-        const float aim = weapon.aimFactor();
-        const float crosshairSize = 1.0f - 0.35f * aim;
-        const glm::vec3 crosshairColor = weapon.hitFlash()
-            ? glm::vec3(1.0f, 0.9f, 0.2f)
-            : glm::vec3(0.2f, 1.0f, 0.4f);
-        crosshairMesh.upload(buildCrosshair(crosshairSize, crosshairColor));
-        renderer.drawOverlay(crosshairMesh);
-
-        // Overlay: health bar (client only).
-        if (mode == "client" && client.isConnected()) {
-            const float fraction = static_cast<float>(client.localHealth()) /
-                                   static_cast<float>(ot::net::kMaxHealth);
-            hudMesh.upload(buildHealthBar(fraction));
-            renderer.drawOverlay(hudMesh);
-        }
-
-        renderer.endFrame();
-    }
-
-    client.disconnect();
-    for (auto& mesh : remoteBoxes) {
-        mesh.destroy();
-    }
-    crosshairMesh.destroy();
-    tracerMesh.destroy();
-    hudMesh.destroy();
-    level.destroy();
-    input.shutdown();
-    renderer.shutdown();
-    SDL_DestroyWindow(window);
-    SDL_Quit();
-    return 0;
+#if OT_PLATFORM_WINDOWS
+    return runMenu();
+#else
+    return runGame(serverHost, port);
+#endif
 }

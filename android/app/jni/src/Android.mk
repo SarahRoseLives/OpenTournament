@@ -17,6 +17,8 @@ LOCAL_SRC_FILES := \
     ../../../../src/render/Renderer.cpp \
     ../../../../src/render/Camera.cpp \
     ../../../../src/render/Mesh.cpp \
+    ../../../../src/render/Font.cpp \
+    ../../../../src/ui/Menu.cpp \
     ../../../../src/input/Input.cpp \
     ../../../../src/game/Level.cpp \
     ../../../../src/game/Player.cpp \
