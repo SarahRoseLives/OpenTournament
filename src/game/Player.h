@@ -19,6 +19,7 @@ struct PlayerInput {
     bool fire = false;
     bool aim = false;
     bool jump = false;
+    int weapon = 0;
     uint32_t sequence = 0;
 };
 

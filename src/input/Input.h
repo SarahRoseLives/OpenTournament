@@ -19,6 +19,9 @@ public:
     // Per-frame look deltas (radians-ish) combining mouse + right stick.
     glm::vec2 lookDelta(float dt) const;
 
+    // Raw right-stick position (x right, y up), deadzone applied.
+    glm::vec2 rightStickAxis() const;
+
     bool jumpHeld() const;
 
     // Right trigger / left mouse button.

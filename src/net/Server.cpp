@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "game/WeaponDef.h"
 #include "map/OtMap.h"
 
 namespace ot {
@@ -152,6 +153,7 @@ void Server::handlePacket(ENetPeer* peer, const ENetPacket* packet) {
             input.fire = (flags & 0x01) != 0;
             input.aim = (flags & 0x02) != 0;
             input.jump = (flags & 0x04) != 0;
+            input.weapon = static_cast<int>(reader.byte());
 
             player->input = input;
             player->lastAckedInput = input.sequence;
@@ -195,6 +197,7 @@ void Server::removePlayer(ServerPlayer* player) {
 
 void Server::respawn(ServerPlayer* player) {
     player->health = kMaxHealth;
+    player->input.weapon = 0;
     player->player.setState(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
                             0.0f, 0.0f);
 }
@@ -208,7 +211,7 @@ void Server::step() {
         player->fireCooldown -= kTick;
         if (player->input.fire && player->fireCooldown <= 0.0f) {
             shoot(*player);
-            player->fireCooldown = kFireInterval;
+            player->fireCooldown = weaponDef(player->input.weapon).fireInterval;
         }
     }
 
@@ -220,13 +223,14 @@ void Server::step() {
 }
 
 void Server::shoot(ServerPlayer& shooter) {
+    const WeaponDef& def = weaponDef(shooter.input.weapon);
     const glm::vec3 dir = shooter.player.camera().forward();
     const glm::vec3 origin = shooter.player.camera().position + dir * 0.4f;
 
-    RayHit worldHit = m_world.raycast(origin, dir, kShotRange);
+    RayHit worldHit = m_world.raycast(origin, dir, def.range);
 
     ServerPlayer* victim = nullptr;
-    float victimDistance = kShotRange;
+    float victimDistance = def.range;
 
     const glm::vec3 half(Player::kHalfWidth, Player::kHalfHeight, Player::kHalfWidth);
     for (auto& other : m_players) {
@@ -234,7 +238,7 @@ void Server::shoot(ServerPlayer& shooter) {
             continue;
         }
         AABB box{other->player.center() - half, other->player.center() + half};
-        const RayHit hit = CollisionWorld::rayBox(origin, dir, box, kShotRange);
+        const RayHit hit = CollisionWorld::rayBox(origin, dir, box, def.range);
         if (hit.hit && hit.distance < victimDistance) {
             victimDistance = hit.distance;
             victim = other.get();
@@ -248,7 +252,7 @@ void Server::shoot(ServerPlayer& shooter) {
         return; // a wall is in the way
     }
 
-    victim->health -= kShotDamage;
+    victim->health -= def.damage;
     if (victim->health <= 0) {
         victim->health = 0;
         shooter.score++;

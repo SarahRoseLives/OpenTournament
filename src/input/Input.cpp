@@ -96,6 +96,11 @@ glm::vec2 Input::lookDelta(float dt) const {
     return delta;
 }
 
+glm::vec2 Input::rightStickAxis() const {
+    return glm::vec2(controllerAxis(SDL_CONTROLLER_AXIS_RIGHTX),
+                     -controllerAxis(SDL_CONTROLLER_AXIS_RIGHTY));
+}
+
 bool Input::jumpHeld() const {
     const Uint8* kb = SDL_GetKeyboardState(nullptr);
     if (kb[SDL_SCANCODE_SPACE]) {

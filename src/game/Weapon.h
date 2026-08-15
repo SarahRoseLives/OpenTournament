@@ -10,6 +10,7 @@ namespace ot {
 
 class ICollisionWorld;
 class Input;
+struct WeaponDef;
 
 struct Tracer {
     glm::vec3 start;
@@ -21,14 +22,15 @@ struct Tracer {
 // and short-lived tracer lines for visual feedback.
 class Weapon {
 public:
-    void update(float dt, const Input& input, const Camera& camera, ICollisionWorld& world);
+    void update(float dt, const Input& input, const Camera& camera, ICollisionWorld& world,
+                const WeaponDef& def);
 
     float aimFactor() const { return m_aim; }
     bool hitFlash() const { return m_flashTimer > 0.0f; }
     const std::vector<Tracer>& tracers() const { return m_tracers; }
 
 private:
-    void fire(const Camera& camera, ICollisionWorld& world);
+    void fire(const Camera& camera, ICollisionWorld& world, const WeaponDef& def);
 
     float m_cooldown = 0.0f;
     float m_aim = 0.0f;

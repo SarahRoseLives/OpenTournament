@@ -173,6 +173,7 @@ void Client::sendInput(const PlayerInput& input) {
     if (input.aim) flags |= 0x02;
     if (input.jump) flags |= 0x04;
     writer.byte(flags);
+    writer.byte(static_cast<uint8_t>(input.weapon));
 
     ENetPacket* packet = enet_packet_create(writer.data(), writer.size(),
                                             ENET_PACKET_FLAG_UNSEQUENCED);

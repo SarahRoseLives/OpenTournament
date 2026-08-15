@@ -21,11 +21,14 @@
 #include "game/Level.h"
 #include "game/Player.h"
 #include "game/Weapon.h"
+#include "game/WeaponDef.h"
 #include "input/Input.h"
 #include "map/OtMap.h"
 #include "map/QuakeMap.h"
 #include "net/Client.h"
 #include "net/Server.h"
+#include "render/Camera.h"
+#include "render/Font.h"
 #include "render/Mesh.h"
 #include "render/Renderer.h"
 #include "ui/Menu.h"
@@ -110,6 +113,116 @@ std::vector<float> buildHealthBar(float fraction) {
                            : fraction > 0.25f ? glm::vec3(1.0f, 0.8f, 0.2f)
                                               : glm::vec3(1.0f, 0.25f, 0.2f);
     pushQuad2D(v, x0, y0, x0 + fill, y0 + height, color);
+    return v;
+}
+
+std::vector<float> buildWeaponBar(int selected) {
+    std::vector<float> v;
+    const int count = ot::weaponCount();
+    const float scale = 0.06f;
+    const float gap = 0.08f;
+
+    float total = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        total += ot::textWidth(std::to_string(i + 1) + " " + ot::weaponDef(i).name, scale);
+        if (i + 1 < count) {
+            total += gap;
+        }
+    }
+
+    const float y = -0.84f;
+    float x = -total * 0.5f;
+    for (int i = 0; i < count; ++i) {
+        const std::string label = std::to_string(i + 1) + " " + ot::weaponDef(i).name;
+        const glm::vec3 color = (i == selected) ? glm::vec3(0.25f, 1.0f, 0.45f)
+                                                : glm::vec3(0.5f, 0.55f, 0.62f);
+        ot::buildText(v, label, x, y, scale, color);
+        x += ot::textWidth(label, scale) + gap;
+    }
+    return v;
+}
+
+constexpr float kPi = 3.14159265f;
+constexpr float kTwoPi = 6.28318531f;
+
+void pushTriangle(std::vector<float>& v, float x0, float y0, float x1, float y1,
+                  float x2, float y2, const glm::vec3& c) {
+    const float tri[3][6] = {
+        {x0, y0, 0, c.r, c.g, c.b},
+        {x1, y1, 0, c.r, c.g, c.b},
+        {x2, y2, 0, c.r, c.g, c.b},
+    };
+    for (int i = 0; i < 3; ++i) {
+        v.insert(v.end(), tri[i], tri[i] + 6);
+    }
+}
+
+void pushDisc(std::vector<float>& v, float cx, float cy, float r, const glm::vec3& c) {
+    const int k = 48;
+    for (int i = 0; i < k; ++i) {
+        const float a0 = static_cast<float>(i) / k * kTwoPi;
+        const float a1 = static_cast<float>(i + 1) / k * kTwoPi;
+        pushTriangle(v, cx, cy, cx + std::cos(a0) * r, cy + std::sin(a0) * r,
+                     cx + std::cos(a1) * r, cy + std::sin(a1) * r, c);
+    }
+}
+
+void pushWedge(std::vector<float>& v, float cx, float cy, float a0, float a1,
+               float r0, float r1, const glm::vec3& c) {
+    const int k = 12;
+    for (int i = 0; i < k; ++i) {
+        const float t0 = a0 + (a1 - a0) * static_cast<float>(i) / k;
+        const float t1 = a0 + (a1 - a0) * static_cast<float>(i + 1) / k;
+        const float x00 = cx + std::cos(t0) * r0;
+        const float y00 = cy + std::sin(t0) * r0;
+        const float x01 = cx + std::cos(t1) * r0;
+        const float y01 = cy + std::sin(t1) * r0;
+        const float x11 = cx + std::cos(t1) * r1;
+        const float y11 = cy + std::sin(t1) * r1;
+        const float x10 = cx + std::cos(t0) * r1;
+        const float y10 = cy + std::sin(t0) * r1;
+        pushTriangle(v, x00, y00, x01, y01, x11, y11, c);
+        pushTriangle(v, x00, y00, x11, y11, x10, y10, c);
+    }
+}
+
+std::vector<float> buildWeaponWheel(int count, int highlight) {
+    std::vector<float> v;
+    const float cx = 0.0f;
+    const float cy = 0.0f;
+    const float R = 0.55f;
+    const float r0 = 0.22f;
+
+    pushDisc(v, cx, cy, R, glm::vec3(0.04f, 0.05f, 0.08f));
+
+    const float seg = kTwoPi / static_cast<float>(count);
+    for (int i = 0; i < count; ++i) {
+        const float aCenter = kPi * 0.5f - static_cast<float>(i) * seg;
+        const float a0 = aCenter - seg * 0.5f;
+        const float a1 = aCenter + seg * 0.5f;
+        const glm::vec3 color = (i == highlight) ? glm::vec3(0.25f, 1.0f, 0.45f)
+                                                  : glm::vec3(0.25f, 0.28f, 0.34f);
+        pushWedge(v, cx, cy, a0, a1, r0, R, color);
+    }
+
+    const float nameScale = 0.09f;
+    const std::string name = ot::weaponDef(highlight).name;
+    ot::buildText(v, name, cx - ot::textWidth(name, nameScale) * 0.5f, cy - 0.03f,
+                  nameScale, glm::vec3(1.0f, 1.0f, 1.0f));
+
+    if (count > 1) {
+        const float midR = (r0 + R) * 0.5f;
+        const float labelScale = 0.06f;
+        for (int i = 0; i < count; ++i) {
+            const float aCenter = kPi * 0.5f - static_cast<float>(i) * seg;
+            const std::string label = std::to_string(i + 1);
+            const float lx = cx + std::cos(aCenter) * midR;
+            const float ly = cy + std::sin(aCenter) * midR;
+            ot::buildText(v, label, lx - ot::textWidth(label, labelScale) * 0.5f,
+                          ly, labelScale, glm::vec3(1.0f, 1.0f, 1.0f));
+        }
+    }
+
     return v;
 }
 
@@ -527,7 +640,7 @@ int runWalk(const std::string& mapPath) {
         }
 
         player.update(dt, input, *world);
-        weapon.update(dt, input, player.camera(), *world);
+        weapon.update(dt, input, player.camera(), *world, ot::weaponDef(0));
         player.camera().fov = glm::mix(baseFov, aimFov, weapon.aimFactor());
 
         renderer.beginFrame();
@@ -676,7 +789,7 @@ int runGen(const std::string& seedStr) {
         }
 
         player.update(dt, input, level.world());
-        weapon.update(dt, input, player.camera(), level.world());
+        weapon.update(dt, input, player.camera(), level.world(), ot::weaponDef(0));
         player.camera().fov = glm::mix(baseFov, aimFov, weapon.aimFactor());
 
         renderer.beginFrame();
@@ -778,6 +891,8 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
     ot::Mesh crosshairMesh;
     ot::Mesh tracerMesh;
     ot::Mesh hudMesh;
+    ot::Mesh weaponBarMesh;
+    ot::Mesh weaponWheelMesh;
 
     const float baseFov = glm::radians(70.0f);
     const float aimFov = glm::radians(45.0f);
@@ -787,6 +902,9 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
 
     bool running = true;
     bool mapApplied = false;
+    int selectedWeapon = 0;
+    bool wheelOpen = false;
+    int wheelHighlight = 0;
     while (running) {
         const Uint64 now = SDL_GetPerformanceCounter();
         float dt = static_cast<float>(static_cast<double>(now - lastCounter) / counterFrequency);
@@ -799,11 +917,71 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
-            } else if (event.type == SDL_KEYDOWN &&
-                       event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                running = false;
+            } else if (event.type == SDL_KEYDOWN) {
+                const auto sc = event.key.keysym.scancode;
+                if (sc == SDL_SCANCODE_ESCAPE) {
+                    running = false;
+                } else if (sc == SDL_SCANCODE_Q) {
+                    wheelOpen = true;
+                    wheelHighlight = selectedWeapon;
+                } else if (event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_9) {
+                    const int idx = event.key.keysym.sym - SDLK_1;
+                    if (idx < ot::weaponCount()) {
+                        selectedWeapon = idx;
+                        wheelHighlight = idx;
+                    }
+                } else if (wheelOpen &&
+                           (sc == SDL_SCANCODE_LEFT || sc == SDL_SCANCODE_UP)) {
+                    wheelHighlight = (wheelHighlight - 1 + ot::weaponCount()) % ot::weaponCount();
+                } else if (wheelOpen &&
+                           (sc == SDL_SCANCODE_RIGHT || sc == SDL_SCANCODE_DOWN)) {
+                    wheelHighlight = (wheelHighlight + 1) % ot::weaponCount();
+                }
+            } else if (event.type == SDL_KEYUP && event.key.keysym.scancode == SDL_SCANCODE_Q) {
+                if (wheelOpen) {
+                    selectedWeapon = wheelHighlight;
+                    wheelOpen = false;
+                }
+            } else if (event.type == SDL_MOUSEWHEEL && event.wheel.y != 0) {
+                const int delta = event.wheel.y > 0 ? -1 : 1;
+                if (wheelOpen) {
+                    wheelHighlight = (wheelHighlight + delta + ot::weaponCount()) % ot::weaponCount();
+                } else {
+                    selectedWeapon = (selectedWeapon + delta + ot::weaponCount()) % ot::weaponCount();
+                }
+            } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+                if (event.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
+                    selectedWeapon = (selectedWeapon - 1 + ot::weaponCount()) % ot::weaponCount();
+                } else if (event.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
+                    selectedWeapon = (selectedWeapon + 1) % ot::weaponCount();
+                } else if (event.cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
+                    wheelOpen = true;
+                    wheelHighlight = selectedWeapon;
+                }
+            } else if (event.type == SDL_CONTROLLERBUTTONUP &&
+                       event.cbutton.button == SDL_CONTROLLER_BUTTON_Y) {
+                if (wheelOpen) {
+                    selectedWeapon = wheelHighlight;
+                    wheelOpen = false;
+                }
             }
             input.handleEvent(event);
+        }
+
+        if (wheelOpen) {
+            const glm::vec2 stick = input.rightStickAxis();
+            if (glm::length(stick) > 0.4f) {
+                float a = std::atan2(stick.y, stick.x);
+                if (a < 0.0f) {
+                    a += kTwoPi;
+                }
+                const int count = ot::weaponCount();
+                float rel = kPi * 0.5f - a; // clockwise from the top segment
+                if (rel < 0.0f) {
+                    rel += kTwoPi;
+                }
+                wheelHighlight = static_cast<int>(std::round(rel / (kTwoPi / count))) % count;
+            }
         }
 
         int width = 0;
@@ -826,6 +1004,7 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
             pi.fire = input.fireHeld();
             pi.aim = input.aimHeld();
             pi.jump = input.jumpHeld();
+            pi.weapon = selectedWeapon;
 
             client.update(dt, pi, level.world());
 
@@ -840,10 +1019,10 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
                 mapApplied = true;
             }
 
-            weapon.update(dt, input, player.camera(), level.world());
+            weapon.update(dt, input, player.camera(), level.world(), ot::weaponDef(selectedWeapon));
         } else {
             player.update(dt, input, level.world());
-            weapon.update(dt, input, player.camera(), level.world());
+            weapon.update(dt, input, player.camera(), level.world(), ot::weaponDef(selectedWeapon));
         }
 
         player.camera().fov = glm::mix(baseFov, aimFov, weapon.aimFactor());
@@ -896,6 +1075,14 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
             renderer.drawOverlay(hudMesh);
         }
 
+        weaponBarMesh.upload(buildWeaponBar(selectedWeapon));
+        renderer.drawOverlay(weaponBarMesh);
+
+        if (wheelOpen) {
+            weaponWheelMesh.upload(buildWeaponWheel(ot::weaponCount(), wheelHighlight));
+            renderer.drawOverlay(weaponWheelMesh);
+        }
+
         renderer.endFrame();
     }
 
@@ -906,6 +1093,8 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
     crosshairMesh.destroy();
     tracerMesh.destroy();
     hudMesh.destroy();
+    weaponBarMesh.destroy();
+    weaponWheelMesh.destroy();
     level.destroy();
     input.shutdown();
     renderer.shutdown();
