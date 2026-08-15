@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-#include "game/CollisionWorld.h"
+#include "game/ICollisionWorld.h"
 #include "input/Input.h"
 
 namespace ot {
@@ -16,7 +16,7 @@ constexpr float kFlashDuration = 0.09f;
 constexpr float kMuzzleOffset = 0.4f;
 } // namespace
 
-void Weapon::update(float dt, const Input& input, const Camera& camera, CollisionWorld& world) {
+void Weapon::update(float dt, const Input& input, const Camera& camera, ICollisionWorld& world) {
     const float targetAim = input.aimHeld() ? 1.0f : 0.0f;
     m_aim += (targetAim - m_aim) * (1.0f - std::exp(-kAimSpeed * dt));
 
@@ -40,7 +40,7 @@ void Weapon::update(float dt, const Input& input, const Camera& camera, Collisio
     }
 }
 
-void Weapon::fire(const Camera& camera, CollisionWorld& world) {
+void Weapon::fire(const Camera& camera, ICollisionWorld& world) {
     const glm::vec3 dir = camera.forward();
     const glm::vec3 origin = camera.position + dir * kMuzzleOffset;
 

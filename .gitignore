@@ -38,3 +38,6 @@ android/.idea/
 # OS
 Thumbs.db
 .DS_Store
+
+# Extracted/imported game assets (kept out of version control)
+assets_local/

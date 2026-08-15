@@ -8,7 +8,7 @@
 
 namespace ot {
 
-class CollisionWorld;
+class ICollisionWorld;
 class Input;
 
 struct PlayerInput {
@@ -31,10 +31,10 @@ public:
     void spawn(const glm::vec3& position, float yaw);
 
     // Authoritative/networked: set look angles from input and integrate movement.
-    void applyInput(const PlayerInput& input, float dt, CollisionWorld& world);
+    void applyInput(const PlayerInput& input, float dt, ICollisionWorld& world);
 
     // Local single-player: applies mouse/stick look deltas, then moves.
-    void update(float dt, const Input& input, CollisionWorld& world);
+    void update(float dt, const Input& input, ICollisionWorld& world);
 
     void setState(const glm::vec3& center, float yaw, float pitch);
 

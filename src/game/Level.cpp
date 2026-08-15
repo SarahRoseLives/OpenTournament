@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "map/OtMap.h"
+
 namespace ot {
 
 namespace {
@@ -93,6 +95,13 @@ void Level::build() {
 void Level::destroy() {
     m_floorMesh.destroy();
     m_boxMesh.destroy();
+    m_mapMesh.destroy();
+}
+
+void Level::buildFromMap(const map::GeneratedMap& map) {
+    m_mapMesh.destroy();
+    map::buildCollision(map, m_world);
+    m_mapMesh.upload(map::buildMesh(map));
 }
 
 } // namespace ot

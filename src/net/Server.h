@@ -2,9 +2,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <enet/enet.h>
+
+#include <glm/glm.hpp>
 
 #include "game/CollisionWorld.h"
 #include "game/Player.h"
@@ -19,7 +22,7 @@ class Server {
 public:
     ~Server();
 
-    bool start(uint16_t port);
+    bool start(uint16_t port, const std::string& mapPath);
     void stop();
     void run(float dt);
 
@@ -48,10 +51,15 @@ private:
     void shoot(ServerPlayer& shooter);
     void sendSnapshots();
     void sendWelcome(ServerPlayer* player);
+    void sendMapData(ServerPlayer* player);
+    glm::vec3 spawnPointForId(uint32_t id) const;
 
     ENetHost* m_host = nullptr;
     CollisionWorld m_world;
     std::vector<std::unique_ptr<ServerPlayer>> m_players;
+
+    std::string m_mapText;
+    std::vector<glm::vec3> m_spawns;
 
     uint32_t m_nextId = 1;
     uint32_t m_tick = 0;

@@ -1,0 +1,6 @@
+# OpenTournament Map v1
+name "DM-12345"
+seed 12345
+arena 40
+obstacles 14
+spawns 6

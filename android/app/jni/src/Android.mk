@@ -22,8 +22,11 @@ LOCAL_SRC_FILES := \
     ../../../../src/game/Player.cpp \
     ../../../../src/game/Weapon.cpp \
     ../../../../src/game/CollisionWorld.cpp \
+    ../../../../src/game/BrushCollisionWorld.cpp \
     ../../../../src/net/Server.cpp \
-    ../../../../src/net/Client.cpp
+    ../../../../src/net/Client.cpp \
+    ../../../../src/map/QuakeMap.cpp \
+    ../../../../src/map/OtMap.cpp
 
 LOCAL_SHARED_LIBRARIES := SDL2
 LOCAL_STATIC_LIBRARIES := enet

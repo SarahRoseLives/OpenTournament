@@ -1,6 +1,6 @@
 #include "game/Player.h"
 
-#include "game/CollisionWorld.h"
+#include "game/ICollisionWorld.h"
 #include "input/Input.h"
 
 namespace ot {
@@ -14,7 +14,7 @@ void Player::spawn(const glm::vec3& position, float yaw) {
     m_camera.position = m_center + glm::vec3(0.0f, kEyeHeight - kHalfHeight, 0.0f);
 }
 
-void Player::applyInput(const PlayerInput& input, float dt, CollisionWorld& world) {
+void Player::applyInput(const PlayerInput& input, float dt, ICollisionWorld& world) {
     m_camera.yaw = input.yaw;
     m_camera.pitch = input.pitch;
 
@@ -40,7 +40,7 @@ void Player::applyInput(const PlayerInput& input, float dt, CollisionWorld& worl
     m_camera.position = m_center + glm::vec3(0.0f, kEyeHeight - kHalfHeight, 0.0f);
 }
 
-void Player::update(float dt, const Input& input, CollisionWorld& world) {
+void Player::update(float dt, const Input& input, ICollisionWorld& world) {
     const glm::vec2 look = input.lookDelta(dt);
     m_camera.rotate(look.x, look.y);
 

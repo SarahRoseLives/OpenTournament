@@ -30,8 +30,11 @@ add_executable(opentournament
     src/game/Player.cpp
     src/game/Weapon.cpp
     src/game/CollisionWorld.cpp
+    src/game/BrushCollisionWorld.cpp
     src/net/Server.cpp
     src/net/Client.cpp
+    src/map/QuakeMap.cpp
+    src/map/OtMap.cpp
 )
 
 target_include_directories(opentournament PRIVATE
@@ -54,4 +57,46 @@ if(MSVC)
     target_compile_options(opentournament PRIVATE /W4)
 else()
     target_compile_options(opentournament PRIVATE -Wall -Wextra)
+endif()
+
+# Copy runtime DLLs (SDL2 + MinGW runtime) next to the executable so the game
+# can be run without a MinGW/MSYS2 environment on PATH.
+if(WIN32 AND MINGW)
+    get_filename_component(OT_MINGW_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(OT_RUNTIME_DLLS
+        "${OT_MINGW_BIN}/libstdc++-6.dll"
+        "${OT_MINGW_BIN}/libwinpthread-1.dll"
+        "${OT_MINGW_BIN}/glew32.dll"
+    )
+    foreach(_dll IN ITEMS libgcc_s_seh-1.dll libgcc_s_dw2-1.dll)
+        if(EXISTS "${OT_MINGW_BIN}/${_dll}")
+            list(APPEND OT_RUNTIME_DLLS "${OT_MINGW_BIN}/${_dll}")
+        endif()
+    endforeach()
+
+    add_custom_command(TARGET opentournament POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:SDL2::SDL2>"
+            "$<TARGET_FILE_DIR:opentournament>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${OT_RUNTIME_DLLS}
+            "$<TARGET_FILE_DIR:opentournament>"
+        COMMENT "Copying runtime DLLs next to opentournament.exe"
+    )
+endif()
+
+# --- UE2 asset tooling (no SDL/GL dependency) ---
+add_executable(ue2tool
+    tools/ue2/main.cpp
+    tools/ue2/UE2.cpp
+    src/map/MapFormat.cpp
+)
+target_include_directories(ue2tool PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/ue2
+)
+if(MSVC)
+    target_compile_options(ue2tool PRIVATE /W4)
+else()
+    target_compile_options(ue2tool PRIVATE -Wall -Wextra)
 endif()

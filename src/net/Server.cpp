@@ -2,31 +2,20 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+
+#include "map/OtMap.h"
 
 namespace ot {
 
 using namespace net;
 
-namespace {
-
-glm::vec3 spawnPointForId(uint32_t id) {
-    static const glm::vec3 kSpawns[] = {
-        {0.0f, 2.0f, 12.0f},
-        {0.0f, 2.0f, -12.0f},
-        {12.0f, 2.0f, 0.0f},
-        {-12.0f, 2.0f, 0.0f},
-        {0.0f, 2.0f, 0.0f},
-    };
-    return kSpawns[id % (sizeof(kSpawns) / sizeof(kSpawns[0]))];
-}
-
-} // namespace
-
 Server::~Server() {
     stop();
 }
 
-bool Server::start(uint16_t port) {
+bool Server::start(uint16_t port, const std::string& mapPath) {
     if (enet_initialize() != 0) {
         std::printf("[ot] enet_initialize failed\n");
         return false;
@@ -42,7 +31,39 @@ bool Server::start(uint16_t port) {
         return false;
     }
 
-    m_world.buildDefault();
+    // Load and generate the map to host (or fall back to the default arena).
+    if (!mapPath.empty()) {
+        std::ifstream file(mapPath, std::ios::binary);
+        if (file) {
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            m_mapText = ss.str();
+        }
+        if (m_mapText.empty()) {
+            std::printf("[ot] cannot read map %s; using default arena\n", mapPath.c_str());
+            m_world.buildDefault();
+        } else {
+            map::GenParams params;
+            std::string name;
+            if (map::parseOtMapText(m_mapText, params, name)) {
+                const map::GeneratedMap generated = map::generate(params);
+                map::buildCollision(generated, m_world);
+                m_spawns.clear();
+                m_spawns.reserve(generated.spawns.size());
+                for (const auto& s : generated.spawns) {
+                    m_spawns.push_back(s.position);
+                }
+                std::printf("[ot] hosting map %s (seed %u, %zu boxes, %zu spawns)\n",
+                            name.c_str(), params.seed, generated.boxes.size(), m_spawns.size());
+            } else {
+                std::printf("[ot] failed to parse map %s; using default arena\n", mapPath.c_str());
+                m_world.buildDefault();
+            }
+        }
+    } else {
+        m_world.buildDefault();
+    }
+
     std::printf("[ot] server listening on port %u\n", port);
     return true;
 }
@@ -111,6 +132,7 @@ void Server::handlePacket(ENetPeer* peer, const ENetPacket* packet) {
                 reader.bytes(player->name, kMaxNameLen - 1);
                 player->name[kMaxNameLen - 1] = '\0';
                 sendWelcome(player);
+                sendMapData(player);
             }
             break;
         }
@@ -146,7 +168,7 @@ Server::ServerPlayer* Server::createPlayer(ENetPeer* peer) {
     player->peer = peer;
     player->id = m_nextId++;
     player->health = kMaxHealth;
-    player->player.spawn(spawnPointForId(player->id), 0.0f);
+    player->player.spawn(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0), 0.0f);
 
     ServerPlayer* raw = player.get();
     peer->data = raw;
@@ -173,7 +195,8 @@ void Server::removePlayer(ServerPlayer* player) {
 
 void Server::respawn(ServerPlayer* player) {
     player->health = kMaxHealth;
-    player->player.setState(spawnPointForId(player->id), 0.0f, 0.0f);
+    player->player.setState(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
+                            0.0f, 0.0f);
 }
 
 void Server::step() {
@@ -275,6 +298,27 @@ void Server::sendWelcome(ServerPlayer* player) {
     ENetPacket* packet = enet_packet_create(writer.data(), writer.size(), ENET_PACKET_FLAG_RELIABLE);
     enet_peer_send(player->peer, 0, packet);
     enet_host_flush(m_host);
+}
+
+void Server::sendMapData(ServerPlayer* player) {
+    if (m_mapText.empty()) {
+        return;
+    }
+    PacketWriter writer;
+    writer.byte(static_cast<uint8_t>(MsgType::MapData));
+    writer.u32(static_cast<uint32_t>(m_mapText.size()));
+    writer.bytes(m_mapText.data(), m_mapText.size());
+
+    ENetPacket* packet = enet_packet_create(writer.data(), writer.size(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(player->peer, 0, packet);
+    enet_host_flush(m_host);
+}
+
+glm::vec3 Server::spawnPointForId(uint32_t id) const {
+    if (m_spawns.empty()) {
+        return glm::vec3(0.0f, 0.0f, 12.0f);
+    }
+    return m_spawns[id % m_spawns.size()];
 }
 
 } // namespace ot

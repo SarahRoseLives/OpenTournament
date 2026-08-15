@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <string>
 #include <vector>
 
 #include <enet/enet.h>
@@ -50,6 +51,9 @@ public:
     int localScore() const { return m_localScore; }
     const std::vector<RemotePlayer>& remotePlayers() const { return m_remote; }
 
+    bool mapReceived() const { return m_mapReady; }
+    const std::string& mapText() const { return m_mapText; }
+
 private:
     struct PredictedInput {
         PlayerInput input;
@@ -63,6 +67,7 @@ private:
     void onWelcome(PacketReader& reader);
     void onSnapshot(PacketReader& reader);
     void onPlayerLeft(PacketReader& reader);
+    void onMapData(PacketReader& reader);
     void reconcile(const PlayerState& state, uint32_t lastAcked);
     void interpolate();
 
@@ -80,6 +85,9 @@ private:
 
     int m_localHealth = kMaxHealth;
     int m_localScore = 0;
+
+    bool m_mapReady = false;
+    std::string m_mapText;
 
     std::deque<PredictedInput> m_history;
     std::vector<RemotePlayer> m_remote;

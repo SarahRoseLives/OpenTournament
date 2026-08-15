@@ -25,6 +25,9 @@ bool Client::connect(const char* host, uint16_t port) {
         return false;
     }
 
+    m_mapReady = false;
+    m_mapText.clear();
+
     m_host = enet_host_create(nullptr, 1, 2, 0, 0);
     if (!m_host) {
         SDL_Log("[ot] enet_host_create failed\n");
@@ -122,6 +125,9 @@ void Client::handleEvent(const ENetEvent& event) {
                     break;
                 case MsgType::PlayerLeft:
                     onPlayerLeft(reader);
+                    break;
+                case MsgType::MapData:
+                    onMapData(reader);
                     break;
                 default:
                     break;
@@ -240,6 +246,17 @@ void Client::onPlayerLeft(PacketReader& reader) {
                                   [id](const RemotePlayer& rp) { return rp.id == id; }),
                    m_remote.end());
     SDL_Log("[ot] player %u left\n", id);
+}
+
+void Client::onMapData(PacketReader& reader) {
+    const uint32_t len = reader.u32();
+    if (!reader.ok() || len == 0 || len > 1024 * 1024) {
+        return;
+    }
+    m_mapText.assign(static_cast<size_t>(len), '\0');
+    reader.bytes(&m_mapText[0], len);
+    m_mapReady = !m_mapText.empty();
+    SDL_Log("[ot] received map (%u bytes)\n", len);
 }
 
 void Client::reconcile(const PlayerState& state, uint32_t lastAcked) {

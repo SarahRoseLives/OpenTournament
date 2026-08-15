@@ -24,6 +24,7 @@ enum class MsgType : uint8_t {
     Input = 2,
     Snapshot = 3,
     PlayerLeft = 4,
+    MapData = 5,
 };
 
 struct PlayerState {
