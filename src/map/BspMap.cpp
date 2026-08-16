@@ -29,11 +29,30 @@ bool gatherPoly(const Map& map, const BspNode& node, std::vector<glm::vec3>& out
     return true;
 }
 
+// A node is "solid" (blocks the player) unless it is a non-CSG sheet or its
+// surface is flagged non-solid/invisible. Rendering and collision must agree so
+// the visible map is exactly the collidable map (no walk-through walls).
+bool isSolidNode(const Map& map, const BspNode& node) {
+    if (node.nodeFlags & 0x01) {  // NF_NotCsg: non-CSG sheet polygon
+        return false;
+    }
+    if (node.surf >= 0 && node.surf < static_cast<int32_t>(map.surfaces.size())) {
+        const uint32_t pf = map.surfaces[node.surf].polyFlags;
+        if (pf & 0x00000008) {  // PF_NotSolid
+            return false;
+        }
+        if (pf & 0x00000001) {  // PF_Invisible
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 void triangulateBsp(const Map& map, TriangleMesh& out) {
     for (const auto& node : map.nodes) {
-        if (node.numVertices < 3) {
+        if (node.numVertices < 3 || !isSolidNode(map, node)) {
             continue;
         }
         std::vector<glm::vec3> poly;
@@ -67,11 +86,7 @@ void buildBspCollision(const Map& map, BrushCollisionWorld& out) {
     const float kThickness = 2.0f;
 
     for (const auto& node : map.nodes) {
-        if (node.numVertices < 3) {
-            continue;
-        }
-        // NF_NotCsg: non-solid (transparent) polygon, skip for collision.
-        if (node.nodeFlags & 0x01) {
+        if (node.numVertices < 3 || !isSolidNode(map, node)) {
             continue;
         }
         std::vector<glm::vec3> poly;
