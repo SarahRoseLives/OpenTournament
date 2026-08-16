@@ -484,7 +484,7 @@ static bool resolveObject(const Package& mainPkg, int32_t index,
     if (pkgName.empty() || pkgName == "None") {
         return false;
     }
-    const std::string objName = mainPkg.resolveIndex(im.objectName);
+    const std::string objName = mainPkg.name(im.objectName);
 
     for (auto& cached : cache) {
         for (int i = 0; i < cached->exportCount(); ++i) {
@@ -955,6 +955,9 @@ struct TerrainInfoData {
     int32_t vertexCount = 0;
     int32_t fnCount = 0;
     std::vector<float> vertices;  // world-space vertices (UE2 Z-up), 3 floats each
+    std::vector<int32_t> layerTextures;  // Texture object ref per layer
+    std::vector<float> layerUScale;
+    std::vector<float> layerVScale;
 };
 
 static bool parseTerrainInfo(const Package& pkg, int exportIndex, TerrainInfoData& out) {
@@ -983,6 +986,10 @@ static bool parseTerrainInfo(const Package& pkg, int exportIndex, TerrainInfoDat
     const int32_t nameScale = findNameIndex(pkg, "TerrainScale");
     const int32_t nameLoc = findNameIndex(pkg, "Location");
     const int32_t nameVec = findNameIndex(pkg, "Vector");
+    const int32_t nameLayers = findNameIndex(pkg, "Layers");
+    const int32_t nameTex = findNameIndex(pkg, "Texture");
+    const int32_t nameUScale = findNameIndex(pkg, "UScale");
+    const int32_t nameVScale = findNameIndex(pkg, "VScale");
 
     while (p + 2 <= end) {
         const int32_t name = Package::readCompact(p, end);
@@ -1037,6 +1044,57 @@ static bool parseTerrainInfo(const Package& pkg, int exportIndex, TerrainInfoDat
             out.location[1] = rdFloat(p + 4);
             out.location[2] = rdFloat(p + 8);
             p += 12;
+        } else if (name == nameLayers && typ == 10) {
+            // FTerrainLayer struct: parse its tagged sub-properties for
+            // Texture / UScale / VScale.
+            const uint8_t* lp = p;
+            const uint8_t* lend = p + size;
+            if (lend > end) lend = end;
+            int32_t texRef = 0;
+            bool hasTex = false;
+            float uScale = 1.0f, vScale = 1.0f;
+            while (lp + 2 <= lend) {
+                const int32_t ln = Package::readCompact(lp, lend);
+                if (ln == 0) break;
+                const uint8_t linfo = *lp++;
+                const uint8_t ltyp = linfo & 0x0F;
+                if (ltyp == 10) Package::readCompact(lp, lend);
+                const uint8_t lsc = linfo & 0x70;
+                int32_t lsize;
+                if (lsc == 0x00) lsize = 1;
+                else if (lsc == 0x10) lsize = 2;
+                else if (lsc == 0x20) lsize = 4;
+                else if (lsc == 0x30) lsize = 12;
+                else if (lsc == 0x40) lsize = 16;
+                else if (lsc == 0x50) { if (lp >= lend) break; lsize = *lp++; }
+                else if (lsc == 0x60) { if (lp + 2 > lend) break; lsize = rdu16(lp); lp += 2; }
+                else { if (lp + 4 > lend) break; lsize = rdi32(lp); lp += 4; }
+                if ((linfo & 0x80) && ltyp != 3) {
+                    const uint8_t lb = *lp++;
+                    if (lb & 0x80) lp += ((lb & 0xC0) == 0x80) ? 1 : 3;
+                }
+                if (ln == nameTex && ltyp == 5) {
+                    texRef = Package::readCompact(lp, lend);
+                    hasTex = true;
+                } else if (ln == nameUScale && ltyp == 4 && lp + 4 <= lend) {
+                    uScale = rdFloat(lp);
+                    lp += 4;
+                } else if (ln == nameVScale && ltyp == 4 && lp + 4 <= lend) {
+                    vScale = rdFloat(lp);
+                    lp += 4;
+                } else if (ltyp == 3) {
+                } else if (ltyp == 5 || ltyp == 6 || ltyp == 8) {
+                    Package::readCompact(lp, lend);
+                } else {
+                    lp += lsize;
+                }
+            }
+            if (hasTex) {
+                out.layerTextures.push_back(texRef);
+                out.layerUScale.push_back(uScale);
+                out.layerVScale.push_back(vScale);
+            }
+            p += size;
         } else if (typ == 3) {
         } else if (typ == 5 || typ == 6 || typ == 8) {
             Package::readCompact(p, end);
@@ -1464,6 +1522,12 @@ int main(int argc, char** argv) {
                     td.toWorld[9], td.toWorld[10], td.toWorld[11]);
         std::printf("sectors=%d vertices=%d faceNormals=%d\n",
                     td.sectorCount, td.vertexCount, td.fnCount);
+        std::printf("layers=%zu:", td.layerTextures.size());
+        for (size_t i = 0; i < td.layerTextures.size(); ++i) {
+            std::printf(" [%zu]tex=%d scale=%.2f/%.2f", i, td.layerTextures[i],
+                        td.layerUScale[i], td.layerVScale[i]);
+        }
+        std::printf("\n");
         if (td.vertexCount > 0) {
             const int n = td.vertexCount;
             std::printf("v[0]=(%.0f %.0f %.0f) v[1]=(%.0f %.0f %.0f) v[128]=(%.0f %.0f %.0f) v[last]=(%.0f %.0f %.0f)\n",
@@ -1491,6 +1555,16 @@ int main(int argc, char** argv) {
             }
         } else {
             std::printf("terrainMap resolve failed\n");
+        }
+        for (size_t li = 0; li < td.layerTextures.size(); ++li) {
+            const Package* lpkg = nullptr;
+            int lidx = -1;
+            if (resolveMaterialTexture(pkg, td.layerTextures[li], lpkg, &lidx, 0, cache)) {
+                std::printf("layer[%zu] tex=%d -> %s [%s]\n", li, td.layerTextures[li],
+                            lpkg->exportName(lidx).c_str(), lpkg->exportClass(lidx).c_str());
+            } else {
+                std::printf("layer[%zu] tex=%d -> RESOLVE FAILED\n", li, td.layerTextures[li]);
+            }
         }
         return 0;
     }
@@ -2053,9 +2127,25 @@ int main(int argc, char** argv) {
                                 terrainMat = static_cast<int32_t>(materials.size());
                                 materials.push_back("terrain");
                             }
+
+                            // Resolve the first terrain layer's texture as the
+                            // terrain diffuse (single-texture first pass).
+                            int32_t terrainTex = -1;
+                            float uScale = 1.0f, vScale = 1.0f;
+                            if (!td.layerTextures.empty()) {
+                                uScale = td.layerUScale[0];
+                                vScale = td.layerVScale[0];
+                                const Package* tpkg = nullptr;
+                                int tidx = -1;
+                                if (resolveMaterialTexture(pkg, td.layerTextures[0],
+                                                           tpkg, &tidx, 0, cache)) {
+                                    terrainTex = addTexture(tpkg, tidx);
+                                }
+                            }
+
                             ot::map::BspSurface bs;
                             bs.materialIndex = terrainMat;
-                            bs.textureIndex = -1;
+                            bs.textureIndex = terrainTex;
                             bs.polyFlags = 0;
                             map.surfaces.push_back(bs);
                             const int32_t surfIdx =
@@ -2070,15 +2160,33 @@ int main(int argc, char** argv) {
                                 return std::array<float, 3>{v[0], v[2], v[1]};
                             };
 
+                            // Texture UV in heightmap texels, tiled by UScale/
+                            // VScale and wrapped into [0,1) (the atlas maps this
+                            // back into the texture's slot).
+                            auto texUV = [&](int x, int y) {
+                                float u = (static_cast<float>(x) + 0.5f) / uScale;
+                                float v = (static_cast<float>(y) + 0.5f) / vScale;
+                                u -= std::floor(u);
+                                v -= std::floor(v);
+                                return std::array<float, 2>{u, v};
+                            };
+
                             auto addTri = [&](const std::array<float, 3>& a,
+                                              const std::array<float, 2>& uva,
                                               const std::array<float, 3>& b,
-                                              const std::array<float, 3>& c) {
-                                for (const auto* v : {&a, &b, &c}) {
-                                    map.points.push_back({(*v)[0], (*v)[1], (*v)[2]});
+                                              const std::array<float, 2>& uvb,
+                                              const std::array<float, 3>& c,
+                                              const std::array<float, 2>& uvc) {
+                                const std::array<float, 3>* ps[3] = {&a, &b, &c};
+                                const std::array<float, 2>* us[3] = {&uva, &uvb, &uvc};
+                                for (int k = 0; k < 3; ++k) {
+                                    map.points.push_back({(*ps[k])[0], (*ps[k])[1], (*ps[k])[2]});
                                     ot::map::BspVert bv;
                                     bv.pointIndex =
                                         static_cast<int32_t>(map.points.size()) - 1;
                                     bv.side = 0;
+                                    bv.u = (*us[k])[0];
+                                    bv.v = (*us[k])[1];
                                     map.verts.push_back(bv);
                                 }
                                 ot::map::BspNode bn;
@@ -2097,8 +2205,12 @@ int main(int argc, char** argv) {
                                     const auto v10 = vert(x + 1, y);
                                     const auto v11 = vert(x + 1, y + 1);
                                     const auto v01 = vert(x, y + 1);
-                                    addTri(v00, v10, v11);
-                                    addTri(v00, v11, v01);
+                                    const auto uv00 = texUV(x, y);
+                                    const auto uv10 = texUV(x + 1, y);
+                                    const auto uv11 = texUV(x + 1, y + 1);
+                                    const auto uv01 = texUV(x, y + 1);
+                                    addTri(v00, uv00, v10, uv10, v11, uv11);
+                                    addTri(v00, uv00, v11, uv11, v01, uv01);
                                 }
                             }
                         }
