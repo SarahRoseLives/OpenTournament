@@ -12,7 +12,13 @@
 
 #include "map/MapFormat.h"
 
+#include "Convert.h"
+
 using namespace ot::ue2;
+
+// Root of the UT2004 install (Textures/, StaticMeshes/, Maps/). Configurable
+// so the server can point at any install location.
+static std::string g_ut2004Root = "C:\\UT2004";
 
 static float rdFloat(const uint8_t* p) {
     uint32_t bits = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
@@ -469,7 +475,7 @@ static bool resolveStaticMesh(const Package& mainPkg, int32_t mesh,
     }
     const std::string meshName = mainPkg.name(im.objectName);
 
-    const std::string usxPath = "C:\\UT2004\\StaticMeshes\\" + pkgName + ".usx";
+    const std::string usxPath = g_ut2004Root + "\\StaticMeshes\\" + pkgName + ".usx";
     for (auto& cached : cache) {
         for (int i = 0; i < cached->exportCount(); ++i) {
             if (cached->exportClass(i) == "StaticMesh" && cached->exportName(i) == meshName) {
@@ -532,8 +538,8 @@ static bool resolveObject(const Package& mainPkg, int32_t index,
         }
     }
     auto p = std::make_unique<Package>();
-    const std::string smPath = "C:\\UT2004\\StaticMeshes\\" + pkgName + ".usx";
-    const std::string txPath = "C:\\UT2004\\Textures\\" + pkgName + ".utx";
+    const std::string smPath = g_ut2004Root + "\\StaticMeshes\\" + pkgName + ".usx";
+    const std::string txPath = g_ut2004Root + "\\Textures\\" + pkgName + ".utx";
     if (!p->open(smPath) && !p->open(txPath)) {
         return false;
     }
@@ -1196,7 +1202,7 @@ static void usage() {
     std::fprintf(stderr, "       ue2tool extract <file.ut2> [--obj] [--out <path>]\n");
 }
 
-int main(int argc, char** argv) {
+int ue2tool_main(int argc, char** argv) {
     if (argc < 3) {
         usage();
         return 1;
@@ -1606,12 +1612,37 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "extract") {
-        bool wantObj = false;
         std::string outPath;
         for (int i = 3; i < argc; ++i) {
-            if (std::strcmp(argv[i], "--obj") == 0) wantObj = true;
-            else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+            if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
         }
+        ot::map::Map map;
+        if (!ue2ToOtMap(path, g_ut2004Root, map)) {
+            std::fprintf(stderr, "[ue2] conversion failed\n");
+            return 1;
+        }
+        if (outPath.empty()) {
+            std::fprintf(stderr, "[ue2] no --out path\n");
+            return 1;
+        }
+        if (ot::map::saveMap(map, outPath)) {
+            std::printf("wrote map %s\n", outPath.c_str());
+        } else {
+            std::fprintf(stderr, "failed to write map %s\n", outPath.c_str());
+        }
+        return 0;
+    }
+
+    usage();
+    return 1;
+}
+
+bool ue2ToOtMap(const std::string& ut2Path, const std::string& ut2004Root, ot::map::Map& out) {
+    g_ut2004Root = ut2004Root;
+    Package pkg;
+    if (!pkg.open(ut2Path)) {
+        return false;
+    }
 
         // Find the largest "Model" export = the level BSP.
         int modelIdx = -1;
@@ -1624,7 +1655,7 @@ int main(int argc, char** argv) {
         }
         if (modelIdx < 0) {
             std::fprintf(stderr, "[ue2] no Model export found\n");
-            return 1;
+            return false;
         }
         const auto& m = pkg.exp(modelIdx);
         std::printf("Model export [%d] name=%s size=%d offset=%d\n", modelIdx,
@@ -1786,46 +1817,12 @@ int main(int argc, char** argv) {
         }
         std::printf("player starts=%zu\n", spawns.size());
 
-        if (!wantObj && outPath.empty()) {
-            return 0;
-        }
-
         std::vector<std::string> matNames(surfCount);
         for (int32_t i = 0; i < surfCount; ++i) {
             matNames[i] = pkg.resolveIndex(surfs[i].material);
         }
 
-        if (wantObj) {
-            std::string objPath = "out.obj";
-            if (!outPath.empty()) {
-                objPath = outPath;
-                const size_t dot = objPath.find_last_of('.');
-                if (dot != std::string::npos) {
-                    objPath = objPath.substr(0, dot) + ".obj";
-                }
-            }
-            FILE* f = std::fopen(objPath.c_str(), "wb");
-            if (!f) { std::fprintf(stderr, "cannot write %s\n", objPath.c_str()); return 1; }
-            std::fprintf(f, "# OpenTournament UE2 BSP export\n");
-            for (const auto& v : points) {
-                // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
-                std::fprintf(f, "v %f %f %f\n", v.x, v.z, v.y);
-            }
-            int32_t lastSurf = -1;
-            for (size_t i = 0; i + 2 < triPointIndex.size(); i += 3) {
-                const int32_t s = triSurf[i / 3];
-                if (s != lastSurf) {
-                    std::fprintf(f, "g %s\n", s >= 0 ? matNames[s].c_str() : "none");
-                    lastSurf = s;
-                }
-                std::fprintf(f, "f %d %d %d\n", triPointIndex[i] + 1,
-                             triPointIndex[i + 1] + 1, triPointIndex[i + 2] + 1);
-            }
-            std::fclose(f);
-            std::printf("wrote %s\n", objPath.c_str());
-        }
-
-        if (!outPath.empty()) {
+        {
             // Deduplicate materials and map each surface to its material index.
             std::vector<std::string> materials;
             std::vector<int32_t> surfMat(surfCount);
@@ -1840,7 +1837,7 @@ int main(int argc, char** argv) {
             }
 
             ot::map::Map map;
-            std::string mapName = path;
+            std::string mapName = ut2Path;
             const size_t slash = mapName.find_last_of("/\\");
             if (slash != std::string::npos) {
                 mapName = mapName.substr(slash + 1);
@@ -2309,16 +2306,8 @@ int main(int argc, char** argv) {
                                        1.57079633f);
             }
 
-            if (ot::map::saveMap(map, outPath)) {
-                std::printf("wrote map %s\n", outPath.c_str());
-            } else {
-                std::fprintf(stderr, "failed to write map %s\n", outPath.c_str());
-            }
+            out = std::move(map);
         }
 
-        return 0;
-    }
-
-    usage();
-    return 1;
+        return true;
 }

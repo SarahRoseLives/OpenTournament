@@ -98,6 +98,7 @@ struct Map {
 uint32_t crc32(const uint8_t* data, size_t size);
 
 bool saveMap(const Map& map, const std::string& path);
+bool saveMap(const Map& map, std::vector<uint8_t>& out);
 bool loadMap(Map& map, const std::string& path);
 bool loadMap(Map& map, const uint8_t* data, size_t size);
 

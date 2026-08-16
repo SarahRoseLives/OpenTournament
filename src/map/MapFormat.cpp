@@ -89,7 +89,7 @@ uint32_t crc32(const uint8_t* data, size_t size) {
     return ~crc;
 }
 
-bool saveMap(const Map& map, const std::string& path) {
+bool saveMap(const Map& map, std::vector<uint8_t>& out) {
     // Build geometry section.
     std::vector<uint8_t> geometry;
     {
@@ -239,6 +239,15 @@ bool saveMap(const Map& map, const std::string& path) {
     patchFull(8, totalSize);
     patchFull(12, crc);
 
+    out = std::move(full);
+    return true;
+}
+
+bool saveMap(const Map& map, const std::string& path) {
+    std::vector<uint8_t> full;
+    if (!saveMap(map, full)) {
+        return false;
+    }
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
         return false;

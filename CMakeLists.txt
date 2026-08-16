@@ -51,6 +51,7 @@ target_link_libraries(opentournament PRIVATE
     SDL2::SDL2main
     SDL2::SDL2
     enet
+    ue2conv
 )
 
 if(WIN32)
@@ -90,17 +91,22 @@ if(WIN32 AND MINGW)
 endif()
 
 # --- UE2 asset tooling (no SDL/GL dependency) ---
-add_executable(ue2tool
+add_library(ue2conv STATIC
     tools/ue2/main.cpp
     tools/ue2/UE2.cpp
     src/map/MapFormat.cpp
 )
-target_include_directories(ue2tool PRIVATE
+target_include_directories(ue2conv PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/ue2
 )
 if(MSVC)
-    target_compile_options(ue2tool PRIVATE /W4)
+    target_compile_options(ue2conv PRIVATE /W4)
 else()
-    target_compile_options(ue2tool PRIVATE -Wall -Wextra)
+    target_compile_options(ue2conv PRIVATE -Wall -Wextra)
 endif()
+
+add_executable(ue2tool
+    tools/ue2/ue2tool_main.cpp
+)
+target_link_libraries(ue2tool PRIVATE ue2conv)

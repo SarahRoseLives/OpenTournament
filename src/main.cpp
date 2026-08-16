@@ -1382,6 +1382,7 @@ int main(int argc, char* argv[]) {
     uint16_t port = ot::net::kDefaultPort;
     std::string mapPath;
     std::string genSeed;
+    std::string ut2004Root = "C:\\UT2004";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -1414,6 +1415,8 @@ int main(int argc, char* argv[]) {
             mapPath = argv[++i];
         } else if (arg == "-p" && i + 1 < argc) {
             port = static_cast<uint16_t>(std::atoi(argv[++i]));
+        } else if (arg == "--ut2004" && i + 1 < argc) {
+            ut2004Root = argv[++i];
         }
     }
 
@@ -1449,7 +1452,7 @@ int main(int argc, char* argv[]) {
         std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
         ot::Server server;
-        if (!server.start(port, mapPath)) {
+        if (!server.start(port, mapPath, ut2004Root)) {
             return 1;
         }
         double last = nowSeconds();

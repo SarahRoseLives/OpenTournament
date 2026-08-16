@@ -5,21 +5,41 @@
 #include <fstream>
 #include <sstream>
 
+#include "core/Platform.h"
 #include "game/BrushCollisionWorld.h"
 #include "game/WeaponDef.h"
 #include "map/BspMap.h"
 #include "map/MapFormat.h"
 #include "map/OtMap.h"
 
+#if !OT_PLATFORM_ANDROID
+#include "Convert.h"
+#endif
+
 namespace ot {
 
 using namespace net;
+
+#if !OT_PLATFORM_ANDROID
+namespace {
+
+bool endsWithUt2(const std::string& s) {
+    const size_t dot = s.find_last_of('.');
+    if (dot == std::string::npos) {
+        return false;
+    }
+    const std::string ext = s.substr(dot);
+    return ext == ".ut2" || ext == ".unr";
+}
+
+}  // namespace
+#endif
 
 Server::~Server() {
     stop();
 }
 
-bool Server::start(uint16_t port, const std::string& mapPath) {
+bool Server::start(uint16_t port, const std::string& mapPath, const std::string& ut2004Root) {
     if (enet_initialize() != 0) {
         std::printf("[ot] enet_initialize failed\n");
         return false;
@@ -37,11 +57,30 @@ bool Server::start(uint16_t port, const std::string& mapPath) {
 
     // Load and generate the map to host (or fall back to the default arena).
     if (!mapPath.empty()) {
-        std::ifstream file(mapPath, std::ios::binary);
-        if (file) {
-            std::ostringstream ss;
-            ss << file.rdbuf();
-            m_mapText = ss.str();
+#if !OT_PLATFORM_ANDROID
+        // Original UT2004 maps are converted in memory at startup, so the
+        // server can host a .ut2 directly (no offline conversion step).
+        if (endsWithUt2(mapPath)) {
+            map::Map converted;
+            if (ue2ToOtMap(mapPath, ut2004Root, converted)) {
+                std::vector<uint8_t> bytes;
+                if (map::saveMap(converted, bytes)) {
+                    m_mapText.assign(reinterpret_cast<const char*>(bytes.data()),
+                                     bytes.size());
+                    std::printf("[ot] converted %s (%zu nodes, %zu surfs)\n",
+                                mapPath.c_str(), converted.nodes.size(),
+                                converted.surfaces.size());
+                }
+            }
+        }
+#endif
+        if (m_mapText.empty()) {
+            std::ifstream file(mapPath, std::ios::binary);
+            if (file) {
+                std::ostringstream ss;
+                ss << file.rdbuf();
+                m_mapText = ss.str();
+            }
         }
     }
 

@@ -23,7 +23,8 @@ class Server {
 public:
     ~Server();
 
-    bool start(uint16_t port, const std::string& mapPath);
+    bool start(uint16_t port, const std::string& mapPath,
+               const std::string& ut2004Root = "C:\\UT2004");
     void stop();
     void run(float dt);
 
