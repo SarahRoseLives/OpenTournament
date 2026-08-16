@@ -28,6 +28,7 @@ bool Client::connect(const char* host, uint16_t port) {
 
     m_mapReady = false;
     m_mapText.clear();
+    m_mapTotal = 0;
 
     m_host = enet_host_create(nullptr, 1, 2, 0, 0);
     if (!m_host) {
@@ -129,6 +130,9 @@ void Client::handleEvent(const ENetEvent& event) {
                     break;
                 case MsgType::MapData:
                     onMapData(reader);
+                    break;
+                case MsgType::MapChunk:
+                    onMapChunk(reader);
                     break;
                 default:
                     break;
@@ -251,14 +255,30 @@ void Client::onPlayerLeft(PacketReader& reader) {
 }
 
 void Client::onMapData(PacketReader& reader) {
-    const uint32_t len = reader.u32();
-    if (!reader.ok() || len == 0 || len > 1024 * 1024) {
+    const uint32_t total = reader.u32();
+    if (!reader.ok() || total == 0 || total > 256u * 1024u * 1024u) {
         return;
     }
-    m_mapText.assign(static_cast<size_t>(len), '\0');
-    reader.bytes(&m_mapText[0], len);
-    m_mapReady = !m_mapText.empty();
-    SDL_Log("[ot] received map (%u bytes)\n", len);
+    m_mapTotal = total;
+    m_mapText.clear();
+    m_mapText.reserve(total);
+    m_mapReady = false;
+    SDL_Log("[ot] receiving map (%u bytes)\n", total);
+}
+
+void Client::onMapChunk(PacketReader& reader) {
+    const uint32_t offset = reader.u32();
+    const size_t len = reader.remaining();
+    if (offset != m_mapText.size() || len == 0) {
+        return;  // Chunks must arrive in order on the reliable channel.
+    }
+    const size_t old = m_mapText.size();
+    m_mapText.resize(old + len);
+    reader.bytes(&m_mapText[old], len);
+    if (m_mapText.size() >= m_mapTotal) {
+        m_mapReady = true;
+        SDL_Log("[ot] received map (%zu bytes)\n", m_mapText.size());
+    }
 }
 
 void Client::reconcile(const PlayerState& state, uint32_t lastAcked) {

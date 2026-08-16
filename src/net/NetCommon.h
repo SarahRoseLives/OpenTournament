@@ -25,7 +25,10 @@ enum class MsgType : uint8_t {
     Snapshot = 3,
     PlayerLeft = 4,
     MapData = 5,
+    MapChunk = 6,
 };
+
+constexpr uint32_t kMapChunkSize = 32 * 1024;
 
 struct PlayerState {
     uint32_t id = 0;
@@ -117,6 +120,10 @@ public:
         if (m_pos + n > m_size) { m_pos = m_size + 1; return; }
         std::memcpy(out, m_data + m_pos, n);
         m_pos += n;
+    }
+
+    size_t remaining() const {
+        return m_pos <= m_size ? m_size - m_pos : 0;
     }
 
 private:

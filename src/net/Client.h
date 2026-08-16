@@ -68,6 +68,7 @@ private:
     void onSnapshot(PacketReader& reader);
     void onPlayerLeft(PacketReader& reader);
     void onMapData(PacketReader& reader);
+    void onMapChunk(PacketReader& reader);
     void reconcile(const PlayerState& state, uint32_t lastAcked);
     void interpolate();
 
@@ -88,6 +89,7 @@ private:
 
     bool m_mapReady = false;
     std::string m_mapText;
+    uint32_t m_mapTotal = 0;
 
     std::deque<PredictedInput> m_history;
     std::vector<RemotePlayer> m_remote;

@@ -362,13 +362,26 @@ void Server::sendMapData(ServerPlayer* player) {
     if (m_mapText.empty()) {
         return;
     }
-    PacketWriter writer;
-    writer.byte(static_cast<uint8_t>(MsgType::MapData));
-    writer.u32(static_cast<uint32_t>(m_mapText.size()));
-    writer.bytes(m_mapText.data(), m_mapText.size());
+    const uint32_t total = static_cast<uint32_t>(m_mapText.size());
 
-    ENetPacket* packet = enet_packet_create(writer.data(), writer.size(), ENET_PACKET_FLAG_RELIABLE);
-    enet_peer_send(player->peer, 0, packet);
+    // Header: announce the total size, then stream the map in fixed chunks so
+    // large maps (multiple MB) survive the reliable packet path.
+    PacketWriter header;
+    header.byte(static_cast<uint8_t>(MsgType::MapData));
+    header.u32(total);
+    ENetPacket* hp = enet_packet_create(header.data(), header.size(), ENET_PACKET_FLAG_RELIABLE);
+    enet_peer_send(player->peer, 0, hp);
+
+    for (uint32_t offset = 0; offset < total; offset += kMapChunkSize) {
+        const uint32_t n = (total - offset) < kMapChunkSize ? (total - offset) : kMapChunkSize;
+        PacketWriter chunk;
+        chunk.byte(static_cast<uint8_t>(MsgType::MapChunk));
+        chunk.u32(offset);
+        chunk.bytes(m_mapText.data() + offset, n);
+        ENetPacket* packet = enet_packet_create(chunk.data(), chunk.size(),
+                                                ENET_PACKET_FLAG_RELIABLE);
+        enet_peer_send(player->peer, 0, packet);
+    }
     enet_host_flush(m_host);
 }
 

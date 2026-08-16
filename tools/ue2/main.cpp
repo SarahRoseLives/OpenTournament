@@ -1,8 +1,10 @@
 #include "UE2.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -127,6 +129,270 @@ static bool parsePlayerStart(const Package& pkg, const uint8_t* base, size_t bas
     return haveLoc;
 }
 
+// ---- Static mesh (FStaticMesh) parsing ----
+
+struct SMTri {
+    float v[9];     // 3 vertices (x,y,z)
+    int32_t mat;    // material index into the mesh's Materials array
+};
+
+// Recursively skip a UE2 tagged-property stream (terminated by name == 0).
+// Mirrors UStruct::SerializeTaggedProperties + FPropertyTag: each tag carries a
+// Size field that is the exact byte count of the value, so unknown structs and
+// arrays can be skipped without knowing their layout.
+static bool skipTagged(const Package& pkg, const uint8_t*& p, const uint8_t* end,
+                       int depth, bool verbose) {
+    if (depth > 32) {
+        return false;
+    }
+    while (p + 2 <= end) {
+        const int32_t name = Package::readCompact(p, end);
+        if (name == 0) {
+            return true;
+        }
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        if (typ == 10) {  // StructProperty: struct name follows.
+            Package::readCompact(p, end);
+        }
+        const uint8_t sc = info & 0x70;
+        int32_t size = 0;
+        if (sc == 0x00) {
+            size = 1;
+        } else if (sc == 0x10) {
+            size = 2;
+        } else if (sc == 0x20) {
+            size = 4;
+        } else if (sc == 0x30) {
+            size = 12;
+        } else if (sc == 0x40) {
+            size = 16;
+        } else if (sc == 0x50) {
+            if (p >= end) return false;
+            size = *p++;
+        } else if (sc == 0x60) {
+            if (p + 2 > end) return false;
+            size = rdu16(p);
+            p += 2;
+        } else {
+            if (p + 4 > end) return false;
+            size = rdi32(p);
+            p += 4;
+        }
+        if ((info & 0x80) && typ != 3) {  // array index (non-bool)
+            if (p >= end) return false;
+            const uint8_t b = *p++;
+            if (b & 0x80) {
+                p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+        }
+        if (verbose) {
+            std::printf("    prop name=%s typ=%d size=%d\n", pkg.name(name).c_str(), typ, size);
+        }
+        if (typ != 3) {  // bool value is stored in the info byte
+            if (size < 0 || p + size > end) return false;
+            p += size;
+        }
+    }
+    return false;
+}
+
+// Parses one UStaticMesh export into a triangle soup (positions + material
+// index). Returns true on success.
+static bool parseStaticMesh(const Package& pkg, int exportIndex,
+                            std::vector<SMTri>& outTris, int* outSectionCount) {
+    const auto& e = pkg.exp(exportIndex);
+    if (e.serialSize <= 0) {
+        return false;
+    }
+    const uint8_t* base = pkg.data();
+    const uint8_t* p = base + e.serialOffset;
+    const uint8_t* end = p + e.serialSize;
+    const uint8_t* hardEnd = base + pkg.size();
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+
+    // 1. UObject property stream (Bounds, BodySetup, Materials, bools, ...).
+    if (!skipTagged(pkg, p, end, 0, false)) {
+        std::fprintf(stderr, "  [smesh] property skip failed\n");
+        return false;
+    }
+    std::printf("  after props off=%lld (size=%d)\n",
+                (long long)(p - (base + e.serialOffset)), e.serialSize);
+
+    // UPrimitive::Serialize serializes BoundingBox (FBox = Min+Max+IsValid = 25
+    // bytes) + BoundingSphere (FSphere = FPlane = 16 bytes) natively, after the
+    // property stream and before UStaticMesh's Sections/BoundingBox.
+    p += 41;
+
+    // 2. Sections.
+    const int32_t sectionCount = Package::readCompact(p, end);
+    if (sectionCount < 0 || sectionCount > 100000) {
+        return false;
+    }
+    p += static_cast<size_t>(sectionCount) * 14;  // FStaticMeshSection (Ver >= 112)
+    if (outSectionCount) {
+        *outSectionCount = sectionCount;
+    }
+
+    // 3. BoundingBox (FBox = 25 bytes) serialized by UStaticMesh::Serialize.
+    p += 25;
+
+    // 4. VertexStream.
+    const int32_t vertCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(vertCount) * 24;  // FStaticMeshVertex
+    p += 4;                                    // Revision
+
+    // 5. ColorStream (FRawColorStream: FColor[count] + Revision).
+    const int32_t colorCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(colorCount) * 4 + 4;
+
+    // 6. AlphaStream (FRawAlphaStream: FColor[count] + Revision).
+    const int32_t alphaCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(alphaCount) * 4 + 4;
+
+    // 7. UVStreams.
+    const int32_t uvStreamCount = Package::readCompact(p, end);
+    for (int32_t i = 0; i < uvStreamCount; ++i) {
+        const int32_t uvCount = Package::readCompact(p, end);
+        p += static_cast<size_t>(uvCount) * 8 + 4 + 4;  // UVs + CoordinateIndex + Revision
+    }
+
+    // 8. IndexBuffer (FRawIndexBuffer: _WORD[count] + Revision).
+    const int32_t idxCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(idxCount) * 2 + 4;
+
+    // 9. WireframeIndexBuffer.
+    const int32_t wfIdxCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(wfIdxCount) * 2 + 4;
+
+    // 10. CollisionModel (UModel* object reference).
+    Package::readCompact(p, end);
+
+    // 11. kDOPTree.
+    const int32_t nodeCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(nodeCount) * 32;  // FkDOPNode
+    const int32_t kdopTriCount = Package::readCompact(p, end);
+    p += static_cast<size_t>(kdopTriCount) * 8;  // FkDOPCollisionTriangle
+
+    std::printf("  verts=%d colors=%d alpha=%d uv=%d idx=%d sections=%d kdopNodes=%d\n",
+                vertCount, colorCount, alphaCount, uvStreamCount, idxCount,
+                sectionCount, nodeCount);
+
+    // 12. RawTriangles (TLazyArray<FStaticMeshTriangle>): endOffset + count + tris.
+    p += 4;  // end offset
+    const int32_t triCount = Package::readCompact(p, end);
+    if (triCount < 0 || triCount > 10000000) {
+        return false;
+    }
+    outTris.reserve(static_cast<size_t>(triCount));
+    for (int32_t i = 0; i < triCount; ++i) {
+        if (p + 60 > end) {
+            return false;
+        }
+        SMTri t;
+        for (int k = 0; k < 9; ++k) {
+            t.v[k] = rdFloat(p);
+            p += 4;
+        }
+        const int32_t numUVs = rdi32(p);
+        p += 4;
+        p += static_cast<size_t>(numUVs) * 24;  // UVs[3][numUVs]
+        p += 12;                                // Colors[3]
+        t.mat = rdi32(p);
+        p += 4;
+        p += 4;  // SmoothingMask
+        outTris.push_back(t);
+    }
+    return true;
+}
+
+// ---- Static mesh placement + resolution ----
+
+struct SMPlacement {
+    int32_t mesh;       // FPackageIndex: >0 export, <0 import
+    float loc[3];       // UE2 Z-up location
+    float scale[3];
+    int32_t pitch, yaw, roll;  // rotator units (65536 = full turn)
+};
+
+// Resolve a static mesh FPackageIndex to (Package, export index). Returns the
+// package that owns the mesh (the input package for exports, a loaded .usx for
+// imports) and the export index of the StaticMesh within it.
+static bool resolveStaticMesh(const Package& mainPkg, int32_t mesh,
+                              const Package*& outPkg, int* outExport,
+                              std::vector<std::unique_ptr<Package>>& cache) {
+    if (mesh > 0) {
+        const int32_t idx = mesh - 1;
+        if (idx < mainPkg.exportCount() && mainPkg.exportClass(idx) == "StaticMesh") {
+            outPkg = &mainPkg;
+            *outExport = idx;
+            return true;
+        }
+        return false;
+    }
+    if (mesh == 0) {
+        return false;
+    }
+    const int32_t imp = -mesh - 1;
+    if (imp < 0 || imp >= mainPkg.importCount()) {
+        return false;
+    }
+    // The import's "package" field names the owning package (another import).
+    const auto& im = mainPkg.imp(imp);
+    const std::string pkgName = mainPkg.resolveIndex(im.package);
+    if (pkgName.empty() || pkgName == "None") {
+        return false;
+    }
+    const std::string meshName = mainPkg.resolveIndex(im.objectName);
+
+    const std::string usxPath = "C:\\UT2004\\StaticMeshes\\" + pkgName + ".usx";
+    for (auto& cached : cache) {
+        for (int i = 0; i < cached->exportCount(); ++i) {
+            if (cached->exportClass(i) == "StaticMesh" && cached->exportName(i) == meshName) {
+                outPkg = cached.get();
+                *outExport = i;
+                return true;
+            }
+        }
+    }
+    auto p = std::make_unique<Package>();
+    if (!p->open(usxPath)) {
+        return false;
+    }
+    for (int i = 0; i < p->exportCount(); ++i) {
+        if (p->exportClass(i) == "StaticMesh" && p->exportName(i) == meshName) {
+            outPkg = p.get();
+            *outExport = i;
+            cache.push_back(std::move(p));
+            return true;
+        }
+    }
+    return false;
+}
+
+// UE2 FRotator -> 3x3 rotation matrix (columns = X, Y, Z axes). UE2 Z-up.
+static void rotatorMatrix(int32_t pitch, int32_t yaw, int32_t roll, float m[9]) {
+    const float k = 6.28318531f / 65536.0f;
+    const float sp = std::sin(static_cast<float>(pitch) * k);
+    const float cp = std::cos(static_cast<float>(pitch) * k);
+    const float sy = std::sin(static_cast<float>(yaw) * k);
+    const float cy = std::cos(static_cast<float>(yaw) * k);
+    const float sr = std::sin(static_cast<float>(roll) * k);
+    const float cr = std::cos(static_cast<float>(roll) * k);
+    // Columns (X, Y, Z) matching UT2004 FRotator ordering.
+    m[0] = cy * cr + sy * sp * sr;
+    m[1] = sy * cr - cy * sp * sr;
+    m[2] = -cp * sr;
+    m[3] = -sy * cp;
+    m[4] = cy * cp;
+    m[5] = sp;
+    m[6] = cy * sr - sy * sp * cr;
+    m[7] = sy * sr + cy * sp * cr;
+    m[8] = cp * cr;
+}
+
 static void usage() {
     std::fprintf(stderr, "usage: ue2tool dump <file.ut2>\n");
     std::fprintf(stderr, "       ue2tool names <file.ut2> <start> <count>\n");
@@ -244,6 +510,159 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+        }
+        return 0;
+    }
+
+    if (cmd == "classes") {
+        for (int i = 0; i < pkg.exportCount(); ++i) {
+            std::printf("[%d] cls=%s name=%s outer=%d size=%d off=%d flags=0x%08X\n", i,
+                        pkg.exportClass(i).c_str(), pkg.exportName(i).c_str(),
+                        pkg.exp(i).package, pkg.exp(i).serialSize,
+                        pkg.exp(i).serialOffset, pkg.exp(i).objectFlags);
+        }
+        return 0;
+    }
+
+    if (cmd == "smactors") {
+        const int32_t nameLoc = findNameIndex(pkg, "Location");
+        const int32_t nameSM = findNameIndex(pkg, "StaticMesh");
+        const int32_t nameVec = findNameIndex(pkg, "Vector");
+        const int32_t nameScale = findNameIndex(pkg, "DrawScale3D");
+        std::printf("names: loc=%d sm=%d vec=%d scale3d=%d\n",
+                    nameLoc, nameSM, nameVec, nameScale);
+
+        for (int i = 0; i < pkg.exportCount(); ++i) {
+            const std::string cls = pkg.exportClass(i);
+            if (cls != "StaticMeshActor" && cls != "StaticMeshInstance") {
+                continue;
+            }
+            const auto& e = pkg.exp(i);
+            if (e.serialSize <= 0) {
+                continue;
+            }
+            const uint8_t* base = pkg.data();
+            const uint8_t* p = base + e.serialOffset;
+            const uint8_t* end = p + e.serialSize;
+            const uint8_t* hardEnd = base + pkg.size();
+            if (end > hardEnd) {
+                end = hardEnd;
+            }
+
+            if (e.objectFlags & 0x02000000) {  // RF_HasStack
+                const int32_t node = Package::readCompact(p, end);
+                Package::readCompact(p, end);  // StateNode
+                p += 8;                        // ProbeMask
+                p += 4;                        // LatentAction
+                if (node != 0) {
+                    Package::readCompact(p, end);  // Offset
+                }
+            }
+
+            float loc[3] = {0, 0, 0};
+            float scale[3] = {1, 1, 1};
+            int32_t mesh = 0;
+            while (p + 2 <= end) {
+                const int32_t name = Package::readCompact(p, end);
+                if (name == 0) {
+                    break;
+                }
+                const uint8_t info = *p++;
+                const uint8_t typ = info & 0x0F;
+                int32_t item = -1;
+                if (typ == 10) {
+                    item = Package::readCompact(p, end);
+                }
+                const uint8_t sc = info & 0x70;
+                int32_t vsize;
+                if (sc == 0x00) {
+                    vsize = 1;
+                } else if (sc == 0x10) {
+                    vsize = 2;
+                } else if (sc == 0x20) {
+                    vsize = 4;
+                } else if (sc == 0x30) {
+                    vsize = 12;
+                } else if (sc == 0x40) {
+                    vsize = 16;
+                } else if (sc == 0x50) {
+                    vsize = *p++;
+                } else if (sc == 0x60) {
+                    vsize = rdu16(p);
+                    p += 2;
+                } else {
+                    vsize = rdi32(p);
+                    p += 4;
+                }
+                if ((info & 0x80) && typ != 3) {
+                    const uint8_t b = *p++;
+                    if (b & 0x80) {
+                        p += ((b & 0xC0) == 0x80) ? 1 : 3;
+                    }
+                }
+
+                if (name == nameLoc && typ == 10 && item == nameVec && p + 12 <= end) {
+                    loc[0] = rdFloat(p);
+                    loc[1] = rdFloat(p + 4);
+                    loc[2] = rdFloat(p + 8);
+                    p += 12;
+                } else if (name == nameSM && typ == 5) {
+                    mesh = Package::readCompact(p, end);
+                } else if (name == nameScale && typ == 10 && item == nameVec && p + 12 <= end) {
+                    scale[0] = rdFloat(p);
+                    scale[1] = rdFloat(p + 4);
+                    scale[2] = rdFloat(p + 8);
+                    p += 12;
+                } else if (typ == 5) {
+                    Package::readCompact(p, end);
+                } else if (typ == 3) {
+                    // bool: value stored in info byte, no bytes follow.
+                } else {
+                    p += vsize;
+                }
+            }
+            std::printf("[%d] %s loc=(%.0f %.0f %.0f) scale=(%.2f %.2f %.2f) mesh=%d(%s)\n",
+                        i, pkg.exportName(i).c_str(), loc[0], loc[1], loc[2],
+                        scale[0], scale[1], scale[2], mesh, pkg.resolveIndex(mesh).c_str());
+        }
+        return 0;
+    }
+
+    if (cmd == "smesh") {
+        int idx = argc > 3 ? std::atoi(argv[3]) : -1;
+        if (idx < 0) {
+            for (int i = 0; i < pkg.exportCount(); ++i) {
+                if (pkg.exportClass(i) == "StaticMesh") {
+                    std::printf("[%d] %s\n", i, pkg.exportName(i).c_str());
+                }
+            }
+            return 0;
+        }
+        std::printf("parsing static mesh [%d] %s\n", idx, pkg.exportName(idx).c_str());
+        std::vector<SMTri> tris;
+        int sections = 0;
+        if (!parseStaticMesh(pkg, idx, tris, &sections)) {
+            std::fprintf(stderr, "failed\n");
+            return 1;
+        }
+        std::printf("sections=%d triangles=%zu\n", sections, tris.size());
+        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto& t : tris) {
+            for (int k = 0; k < 3; ++k) {
+                for (int c = 0; c < 3; ++c) {
+                    const float v = t.v[k * 3 + c];
+                    mn[c] = mn[c] < v ? mn[c] : v;
+                    mx[c] = mx[c] > v ? mx[c] : v;
+                }
+            }
+        }
+        std::printf("bounds min=(%.0f %.0f %.0f) max=(%.0f %.0f %.0f)\n",
+                    mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+        for (size_t i = 0; i < tris.size() && i < 3; ++i) {
+            std::printf("  tri[%zu] (%.0f %.0f %.0f) (%.0f %.0f %.0f) (%.0f %.0f %.0f) mat=%d\n",
+                        i, tris[i].v[0], tris[i].v[1], tris[i].v[2],
+                        tris[i].v[3], tris[i].v[4], tris[i].v[5],
+                        tris[i].v[6], tris[i].v[7], tris[i].v[8], tris[i].mat);
         }
         return 0;
     }
@@ -526,7 +945,16 @@ int main(int argc, char** argv) {
             }
 
             ot::map::Map map;
-            std::strncpy(map.name, "DM-Rankin", sizeof(map.name) - 1);
+            std::string mapName = path;
+            const size_t slash = mapName.find_last_of("/\\");
+            if (slash != std::string::npos) {
+                mapName = mapName.substr(slash + 1);
+            }
+            const size_t dot = mapName.find_last_of('.');
+            if (dot != std::string::npos) {
+                mapName = mapName.substr(0, dot);
+            }
+            std::strncpy(map.name, mapName.c_str(), sizeof(map.name) - 1);
             // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
             map.points.reserve(points.size());
             for (const auto& v : points) {
@@ -563,6 +991,175 @@ int main(int argc, char** argv) {
                 bs.planeX = s.plane[0]; bs.planeY = s.plane[2]; bs.planeZ = s.plane[1]; bs.planeW = s.plane[3];
                 map.surfaces.push_back(bs);
             }
+
+            // ---- Static meshes: append each placed mesh's triangles as BSP
+            // nodes (3-vertex polygons) so they render and collide identically
+            // to the BSP geometry.
+            const int32_t nameSM = findNameIndex(pkg, "StaticMesh");
+            const int32_t nameScale3d = findNameIndex(pkg, "DrawScale3D");
+            std::vector<std::unique_ptr<Package>> smPackages;
+            size_t smTriangles = 0;
+            size_t smActors = 0;
+            size_t smFailed = 0;
+            if (nameLoc >= 0 && nameVec >= 0 && nameRot >= 0 && nameRotator >= 0 &&
+                nameSM >= 0) {
+                for (int i = 0; i < pkg.exportCount(); ++i) {
+                    if (pkg.exportClass(i) != "StaticMeshActor") {
+                        continue;
+                    }
+                    const auto& e = pkg.exp(i);
+                    if (e.serialSize <= 0) {
+                        continue;
+                    }
+                    const uint8_t* ap = pkg.data() + e.serialOffset;
+                    const uint8_t* aend = ap + e.serialSize;
+                    const uint8_t* hardEnd = pkg.data() + pkg.size();
+                    if (aend > hardEnd) {
+                        aend = hardEnd;
+                    }
+                    if (e.objectFlags & 0x02000000) {  // RF_HasStack
+                        const int32_t st = Package::readCompact(ap, aend);
+                        Package::readCompact(ap, aend);  // StateNode
+                        ap += 8;                         // ProbeMask
+                        ap += 4;                         // LatentAction
+                        if (st != 0) {
+                            Package::readCompact(ap, aend);  // Offset
+                        }
+                    }
+                    SMPlacement pl;
+                    pl.mesh = 0;
+                    while (ap + 2 <= aend) {
+                        const int32_t name = Package::readCompact(ap, aend);
+                        if (name == 0) {
+                            break;
+                        }
+                        const uint8_t info = *ap++;
+                        const uint8_t typ = info & 0x0F;
+                        int32_t item = -1;
+                        if (typ == 10) {
+                            item = Package::readCompact(ap, aend);
+                        }
+                        const uint8_t sc = info & 0x70;
+                        int32_t vsize;
+                        if (sc == 0x00) {
+                            vsize = 1;
+                        } else if (sc == 0x10) {
+                            vsize = 2;
+                        } else if (sc == 0x20) {
+                            vsize = 4;
+                        } else if (sc == 0x30) {
+                            vsize = 12;
+                        } else if (sc == 0x40) {
+                            vsize = 16;
+                        } else if (sc == 0x50) {
+                            if (ap >= aend) break;
+                            vsize = *ap++;
+                        } else if (sc == 0x60) {
+                            if (ap + 2 > aend) break;
+                            vsize = rdu16(ap);
+                            ap += 2;
+                        } else {
+                            if (ap + 4 > aend) break;
+                            vsize = rdi32(ap);
+                            ap += 4;
+                        }
+                        if ((info & 0x80) && typ != 3) {
+                            const uint8_t b = *ap++;
+                            if (b & 0x80) {
+                                ap += ((b & 0xC0) == 0x80) ? 1 : 3;
+                            }
+                        }
+                        if (name == nameLoc && typ == 10 && item == nameVec && ap + 12 <= aend) {
+                            pl.loc[0] = rdFloat(ap);
+                            pl.loc[1] = rdFloat(ap + 4);
+                            pl.loc[2] = rdFloat(ap + 8);
+                            ap += 12;
+                        } else if (name == nameRot && typ == 10 && item == nameRotator && ap + 12 <= aend) {
+                            pl.pitch = rdi32(ap);
+                            pl.yaw = rdi32(ap + 4);
+                            pl.roll = rdi32(ap + 8);
+                            ap += 12;
+                        } else if (name == nameSM && typ == 5) {
+                            pl.mesh = Package::readCompact(ap, aend);
+                        } else if (name == nameScale3d && typ == 10 && item == nameVec && ap + 12 <= aend) {
+                            pl.scale[0] = rdFloat(ap);
+                            pl.scale[1] = rdFloat(ap + 4);
+                            pl.scale[2] = rdFloat(ap + 8);
+                            ap += 12;
+                        } else if (typ == 5) {
+                            Package::readCompact(ap, aend);
+                        } else if (typ == 3) {
+                        } else {
+                            ap += vsize;
+                        }
+                    }
+                    if (pl.mesh == 0) {
+                        continue;
+                    }
+                    const Package* smPkg = nullptr;
+                    int smExport = -1;
+                    if (!resolveStaticMesh(pkg, pl.mesh, smPkg, &smExport, smPackages)) {
+                        ++smFailed;
+                        continue;
+                    }
+                    std::vector<SMTri> tris;
+                    if (!parseStaticMesh(*smPkg, smExport, tris, nullptr)) {
+                        ++smFailed;
+                        continue;
+                    }
+
+                    const std::string matName = smPkg->exportName(smExport);
+                    int32_t matIdx = -1;
+                    for (size_t k = 0; k < materials.size(); ++k) {
+                        if (materials[k] == matName) {
+                            matIdx = static_cast<int32_t>(k);
+                            break;
+                        }
+                    }
+                    if (matIdx < 0) {
+                        matIdx = static_cast<int32_t>(materials.size());
+                        materials.push_back(matName);
+                    }
+
+                    ot::map::BspSurface bs;
+                    bs.materialIndex = matIdx;
+                    bs.polyFlags = 0;
+                    map.surfaces.push_back(bs);
+                    const int32_t surfIdx = static_cast<int32_t>(map.surfaces.size()) - 1;
+
+                    float rm[9];
+                    rotatorMatrix(pl.pitch, pl.yaw, pl.roll, rm);
+
+                    for (const auto& t : tris) {
+                        for (int v = 0; v < 3; ++v) {
+                            const float lx = t.v[v * 3 + 0] * pl.scale[0];
+                            const float ly = t.v[v * 3 + 1] * pl.scale[1];
+                            const float lz = t.v[v * 3 + 2] * pl.scale[2];
+                            const float wx = rm[0] * lx + rm[3] * ly + rm[6] * lz + pl.loc[0];
+                            const float wy = rm[1] * lx + rm[4] * ly + rm[7] * lz + pl.loc[1];
+                            const float wz = rm[2] * lx + rm[5] * ly + rm[8] * lz + pl.loc[2];
+                            // UE2 Z-up -> engine Y-up: (x, y, z) -> (x, z, y).
+                            map.points.push_back({wx, wz, wy});
+                            ot::map::BspVert bv;
+                            bv.pointIndex = static_cast<int32_t>(map.points.size()) - 1;
+                            bv.side = 0;
+                            map.verts.push_back(bv);
+                        }
+                        ot::map::BspNode bn;
+                        bn.vertPool = static_cast<int32_t>(map.verts.size()) - 3;
+                        bn.surf = surfIdx;
+                        bn.vertex = bn.vertPool;
+                        bn.numVertices = 3;
+                        bn.nodeFlags = 0;
+                        map.nodes.push_back(bn);
+                        ++smTriangles;
+                    }
+                    ++smActors;
+                }
+            }
+            std::printf("static meshes: actors=%zu triangles=%zu failed=%zu\n",
+                        smActors, smTriangles, smFailed);
+
             map.materials = materials;
 
             // Player starts: UE2 Z-up -> our Y-up (x, y, z) -> (x, z, y), and
