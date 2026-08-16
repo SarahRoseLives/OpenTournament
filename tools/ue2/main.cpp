@@ -1,5 +1,7 @@
 #include "UE2.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -763,10 +765,12 @@ static bool decodeTexture(int format, const uint8_t* src, size_t srcSize,
     return false;  // P8 and other paletted/rare formats unsupported for now.
 }
 
-// Parse one UTexture export into RGBA (mip 0). Returns format via outFormat.
-static bool parseTexture(const Package& pkg, int exportIndex,
-                         std::vector<uint8_t>& outRgba, int& outW, int& outH,
-                         int& outFormat) {
+// Locate a UTexture's mip-0 pixel data (and its format/dimensions) by scanning
+// the serial data for the Format/UBits/VBits tagged properties. Returns the
+// raw data pointer and byte count.
+static bool locateTextureMip0(const Package& pkg, int exportIndex,
+                              int& format, int& w, int& h,
+                              const uint8_t*& dataPtr, int32_t& dataCount) {
     const auto& e = pkg.exp(exportIndex);
     if (e.serialSize <= 0) {
         return false;
@@ -779,7 +783,7 @@ static bool parseTexture(const Package& pkg, int exportIndex,
         end = hardEnd;
     }
 
-    int format = -1;
+    format = -1;
     int uBits = -1;
     int vBits = -1;
 
@@ -885,8 +889,8 @@ static bool parseTexture(const Package& pkg, int exportIndex,
     if (uBits > 14 || vBits > 14) {
         return false;  // sanity: reject implausibly large textures
     }
-    const int w = 1 << uBits;
-    const int h = 1 << vBits;
+    w = 1 << uBits;
+    h = 1 << vBits;
 
     // Mips: count + per mip (DataArray lazy + USize/VSize/UBits/VBits).
     const int32_t mipCount = Package::readCompact(p, end);
@@ -894,18 +898,183 @@ static bool parseTexture(const Package& pkg, int exportIndex,
         return false;
     }
     p += 4;  // DataArray lazy end offset.
-    const int32_t dataCount = Package::readCompact(p, end);
+    dataCount = Package::readCompact(p, end);
     if (dataCount < 0 || p + dataCount > end) {
         return false;
     }
-    const uint8_t* dataPtr = p;
-    p += dataCount;
-    p += 4 + 4 + 1 + 1;  // USize, VSize, UBits, VBits of mip 0.
+    dataPtr = p;
+    return true;
+}
 
+// Parse one UTexture export into RGBA (mip 0). Returns format via outFormat.
+static bool parseTexture(const Package& pkg, int exportIndex,
+                         std::vector<uint8_t>& outRgba, int& outW, int& outH,
+                         int& outFormat) {
+    int format = -1, w = 0, h = 0;
+    const uint8_t* dataPtr = nullptr;
+    int32_t dataCount = 0;
+    if (!locateTextureMip0(pkg, exportIndex, format, w, h, dataPtr, dataCount)) {
+        return false;
+    }
     outW = w;
     outH = h;
     outFormat = format;
     return decodeTexture(format, dataPtr, dataCount, outRgba, w, h);
+}
+
+// Decode a G16 heightmap texture into 16-bit heights.
+static bool decodeHeightmap(const Package& pkg, int exportIndex,
+                            std::vector<uint16_t>& out, int& outW, int& outH) {
+    int format = -1, w = 0, h = 0;
+    const uint8_t* dataPtr = nullptr;
+    int32_t dataCount = 0;
+    if (!locateTextureMip0(pkg, exportIndex, format, w, h, dataPtr, dataCount)) {
+        return false;
+    }
+    if (format != 0x0a || dataCount < w * h * 2) {  // TEXF_G16
+        return false;
+    }
+    outW = w;
+    outH = h;
+    out.resize(static_cast<size_t>(w) * h);
+    for (int i = 0; i < w * h; ++i) {
+        out[i] = static_cast<uint16_t>(dataPtr[i * 2] | (dataPtr[i * 2 + 1] << 8));
+    }
+    return true;
+}
+
+// ATerrainInfo data needed to rebuild the terrain mesh.
+struct TerrainInfoData {
+    int32_t terrainMap = 0;   // FPackageIndex of the heightmap texture (G16)
+    float scale[3];           // TerrainScale (UE2 Z-up)
+    float location[3];        // Location (UE2 Z-up)
+    int32_t heightmapX = 0;
+    int32_t heightmapY = 0;
+    float toWorld[12];        // FCoords: Origin + X/Y/Z axes (UE2 Z-up)
+    int32_t sectorCount = 0;
+    int32_t vertexCount = 0;
+    int32_t fnCount = 0;
+    std::vector<float> vertices;  // world-space vertices (UE2 Z-up), 3 floats each
+};
+
+static bool parseTerrainInfo(const Package& pkg, int exportIndex, TerrainInfoData& out) {
+    const auto& e = pkg.exp(exportIndex);
+    if (e.serialSize <= 0) {
+        return false;
+    }
+    const uint8_t* p = pkg.data() + e.serialOffset;
+    const uint8_t* end = p + e.serialSize;
+    const uint8_t* hardEnd = pkg.data() + pkg.size();
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+
+    if (e.objectFlags & 0x02000000) {  // RF_HasStack
+        const int32_t node = Package::readCompact(p, end);
+        Package::readCompact(p, end);
+        p += 8;
+        p += 4;
+        if (node != 0) {
+            Package::readCompact(p, end);
+        }
+    }
+
+    const int32_t nameTerrainMap = findNameIndex(pkg, "TerrainMap");
+    const int32_t nameScale = findNameIndex(pkg, "TerrainScale");
+    const int32_t nameLoc = findNameIndex(pkg, "Location");
+    const int32_t nameVec = findNameIndex(pkg, "Vector");
+
+    while (p + 2 <= end) {
+        const int32_t name = Package::readCompact(p, end);
+        if (name == 0) {
+            break;
+        }
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        int32_t item = -1;
+        if (typ == 10) {
+            item = Package::readCompact(p, end);
+        }
+        const uint8_t sc = info & 0x70;
+        int32_t size;
+        if (sc == 0x00) {
+            size = 1;
+        } else if (sc == 0x10) {
+            size = 2;
+        } else if (sc == 0x20) {
+            size = 4;
+        } else if (sc == 0x30) {
+            size = 12;
+        } else if (sc == 0x40) {
+            size = 16;
+        } else if (sc == 0x50) {
+            if (p >= end) return false;
+            size = *p++;
+        } else if (sc == 0x60) {
+            if (p + 2 > end) return false;
+            size = rdu16(p);
+            p += 2;
+        } else {
+            if (p + 4 > end) return false;
+            size = rdi32(p);
+            p += 4;
+        }
+        if ((info & 0x80) && typ != 3) {
+            const uint8_t b = *p++;
+            if (b & 0x80) {
+                p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+        }
+        if (name == nameTerrainMap && typ == 5) {
+            out.terrainMap = Package::readCompact(p, end);
+        } else if (name == nameScale && typ == 10 && item == nameVec && p + 12 <= end) {
+            out.scale[0] = rdFloat(p);
+            out.scale[1] = rdFloat(p + 4);
+            out.scale[2] = rdFloat(p + 8);
+            p += 12;
+        } else if (name == nameLoc && typ == 10 && item == nameVec && p + 12 <= end) {
+            out.location[0] = rdFloat(p);
+            out.location[1] = rdFloat(p + 4);
+            out.location[2] = rdFloat(p + 8);
+            p += 12;
+        } else if (typ == 3) {
+        } else if (typ == 5 || typ == 6 || typ == 8) {
+            Package::readCompact(p, end);
+        } else {
+            p += size;
+        }
+    }
+
+    // Native serialization: Sectors, Vertices, SectorsX/Y, FaceNormals,
+    // ToWorld/ToHeightmap (FCoords), HeightmapX/Y, VertexColors.
+    const int32_t sectorCount = Package::readCompact(p, end);
+    out.sectorCount = sectorCount;
+    for (int32_t i = 0; i < sectorCount; ++i) {
+        Package::readCompact(p, end);
+    }
+    const int32_t vertexCount = Package::readCompact(p, end);
+    out.vertexCount = vertexCount;
+    out.vertices.resize(static_cast<size_t>(vertexCount) * 3);
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        out.vertices[i * 3 + 0] = rdFloat(p);
+        out.vertices[i * 3 + 1] = rdFloat(p + 4);
+        out.vertices[i * 3 + 2] = rdFloat(p + 8);
+        p += 12;
+    }
+    p += 8;  // SectorsX, SectorsY
+    const int32_t fnCount = Package::readCompact(p, end);
+    out.fnCount = fnCount;
+    p += static_cast<size_t>(fnCount) * 24;  // FTerrainNormalPair = 2 FVectors
+    for (int k = 0; k < 12; ++k) {
+        out.toWorld[k] = rdFloat(p);
+        p += 4;
+    }
+    p += 48;  // ToHeightmap
+    out.heightmapX = rdi32(p);
+    p += 4;
+    out.heightmapY = rdi32(p);
+    p += 4;
+    return true;
 }
 
 static bool writePpm(const std::string& path, const std::vector<uint8_t>& rgba,
@@ -1264,6 +1433,65 @@ int main(int argc, char** argv) {
             }
         }
         std::printf("done.\n");
+        return 0;
+    }
+
+    if (cmd == "terrain") {
+        int idx = -1;
+        for (int i = 0; i < pkg.exportCount(); ++i) {
+            if (pkg.exportClass(i) == "TerrainInfo") {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            std::fprintf(stderr, "no TerrainInfo export\n");
+            return 1;
+        }
+        TerrainInfoData td;
+        if (!parseTerrainInfo(pkg, idx, td)) {
+            std::fprintf(stderr, "parseTerrainInfo failed\n");
+            return 1;
+        }
+        std::printf("TerrainInfo[%d]: terrainMap=%d scale=(%.1f %.1f %.1f) loc=(%.0f %.0f %.0f) hm=%dx%d\n",
+                    idx, td.terrainMap, td.scale[0], td.scale[1], td.scale[2],
+                    td.location[0], td.location[1], td.location[2],
+                    td.heightmapX, td.heightmapY);
+        std::printf("ToWorld: origin=(%.1f %.1f %.1f) x=(%.1f %.1f %.1f) y=(%.1f %.1f %.1f) z=(%.3f %.3f %.3f)\n",
+                    td.toWorld[0], td.toWorld[1], td.toWorld[2],
+                    td.toWorld[3], td.toWorld[4], td.toWorld[5],
+                    td.toWorld[6], td.toWorld[7], td.toWorld[8],
+                    td.toWorld[9], td.toWorld[10], td.toWorld[11]);
+        std::printf("sectors=%d vertices=%d faceNormals=%d\n",
+                    td.sectorCount, td.vertexCount, td.fnCount);
+        if (td.vertexCount > 0) {
+            const int n = td.vertexCount;
+            std::printf("v[0]=(%.0f %.0f %.0f) v[1]=(%.0f %.0f %.0f) v[128]=(%.0f %.0f %.0f) v[last]=(%.0f %.0f %.0f)\n",
+                        td.vertices[0], td.vertices[1], td.vertices[2],
+                        td.vertices[3], td.vertices[4], td.vertices[5],
+                        td.vertices[128 * 3], td.vertices[128 * 3 + 1], td.vertices[128 * 3 + 2],
+                        td.vertices[(n - 1) * 3], td.vertices[(n - 1) * 3 + 1],
+                        td.vertices[(n - 1) * 3 + 2]);
+        }
+        const Package* tpkg = nullptr;
+        int texp = -1;
+        std::vector<std::unique_ptr<Package>> cache;
+        if (resolveObject(pkg, td.terrainMap, tpkg, &texp, cache)) {
+            std::vector<uint16_t> hm;
+            int w = 0, h = 0;
+            if (decodeHeightmap(*tpkg, texp, hm, w, h)) {
+                uint16_t mn = 65535, mx = 0;
+                for (auto v : hm) {
+                    mn = std::min(mn, v);
+                    mx = std::max(mx, v);
+                }
+                std::printf("heightmap %dx%d range [%u, %u]\n", w, h, mn, mx);
+            } else {
+                std::printf("heightmap decode failed\n");
+            }
+        } else {
+            std::printf("terrainMap resolve failed\n");
+        }
         return 0;
     }
 
@@ -1796,6 +2024,88 @@ int main(int argc, char** argv) {
             }
             std::printf("static meshes: actors=%zu triangles=%zu failed=%zu\n",
                         smActors, smTriangles, smFailed);
+
+            // ---- Terrain: build the ATerrainInfo heightmap as a triangle grid.
+            size_t terrainTriangles = 0;
+            {
+                int terrainExport = -1;
+                for (int i = 0; i < pkg.exportCount(); ++i) {
+                    if (pkg.exportClass(i) == "TerrainInfo") {
+                        terrainExport = i;
+                        break;
+                    }
+                }
+                if (terrainExport >= 0) {
+                    TerrainInfoData td;
+                    if (parseTerrainInfo(pkg, terrainExport, td)) {
+                        const int w = td.heightmapX;
+                        const int h = td.heightmapY;
+                        if (w > 0 && h > 0 &&
+                            td.vertices.size() == static_cast<size_t>(w) * h * 3) {
+                            int32_t terrainMat = -1;
+                            for (size_t k = 0; k < materials.size(); ++k) {
+                                if (materials[k] == "terrain") {
+                                    terrainMat = static_cast<int32_t>(k);
+                                    break;
+                                }
+                            }
+                            if (terrainMat < 0) {
+                                terrainMat = static_cast<int32_t>(materials.size());
+                                materials.push_back("terrain");
+                            }
+                            ot::map::BspSurface bs;
+                            bs.materialIndex = terrainMat;
+                            bs.textureIndex = -1;
+                            bs.polyFlags = 0;
+                            map.surfaces.push_back(bs);
+                            const int32_t surfIdx =
+                                static_cast<int32_t>(map.surfaces.size()) - 1;
+
+                            // Terrain vertices are already in world space (UE2
+                            // Z-up), stored row-major: index = (y * w + x) * 3.
+                            auto vert = [&](int x, int y) {
+                                const float* v =
+                                    &td.vertices[(static_cast<size_t>(y) * w + x) * 3];
+                                // UE2 Z-up -> engine Y-up: (x, y, z) -> (x, z, y).
+                                return std::array<float, 3>{v[0], v[2], v[1]};
+                            };
+
+                            auto addTri = [&](const std::array<float, 3>& a,
+                                              const std::array<float, 3>& b,
+                                              const std::array<float, 3>& c) {
+                                for (const auto* v : {&a, &b, &c}) {
+                                    map.points.push_back({(*v)[0], (*v)[1], (*v)[2]});
+                                    ot::map::BspVert bv;
+                                    bv.pointIndex =
+                                        static_cast<int32_t>(map.points.size()) - 1;
+                                    bv.side = 0;
+                                    map.verts.push_back(bv);
+                                }
+                                ot::map::BspNode bn;
+                                bn.vertPool = static_cast<int32_t>(map.verts.size()) - 3;
+                                bn.surf = surfIdx;
+                                bn.vertex = bn.vertPool;
+                                bn.numVertices = 3;
+                                bn.nodeFlags = 0;
+                                map.nodes.push_back(bn);
+                                ++terrainTriangles;
+                            };
+
+                            for (int y = 0; y + 1 < h; ++y) {
+                                for (int x = 0; x + 1 < w; ++x) {
+                                    const auto v00 = vert(x, y);
+                                    const auto v10 = vert(x + 1, y);
+                                    const auto v11 = vert(x + 1, y + 1);
+                                    const auto v01 = vert(x, y + 1);
+                                    addTri(v00, v10, v11);
+                                    addTri(v00, v11, v01);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            std::printf("terrain triangles=%zu\n", terrainTriangles);
 
             // Extract and pack the resolved textures (RGBA8 mip 0).
             size_t texDecoded = 0;
