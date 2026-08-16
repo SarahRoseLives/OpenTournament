@@ -2,6 +2,10 @@
 
 #include <cmath>
 
+#include "game/BrushCollisionWorld.h"
+#include "game/CollisionWorld.h"
+#include "map/BspMap.h"
+#include "map/MapFormat.h"
 #include "map/OtMap.h"
 
 namespace ot {
@@ -53,14 +57,16 @@ void addBox(std::vector<float>& verts, const glm::vec3& min, const glm::vec3& ma
 } // namespace
 
 void Level::build() {
-    m_world.buildDefault();
+    auto world = std::make_unique<CollisionWorld>();
+    world->buildDefault();
+    m_world = std::move(world);
 
     // --- Floor: checkerboard tiles ---
     std::vector<float> floorVerts;
-    const float tileSize = 2.0f;
-    const float half = 25.0f;
+    const float tileSize = 100.0f;
+    const float half = 1250.0f;
     const int tiles = 25;
-    const float y = 0.01f;
+    const float y = 0.5f;
     const glm::vec3 dark(0.25f, 0.27f, 0.33f);
     const glm::vec3 light(0.33f, 0.36f, 0.44f);
 
@@ -80,15 +86,15 @@ void Level::build() {
 
     // --- Boxes (walls + crates) ---
     std::vector<float> boxVerts;
-    const float wallHeight = 4.0f;
+    const float wallHeight = 200.0f;
     const glm::vec3 wallColor(0.22f, 0.24f, 0.30f);
-    addBox(boxVerts, glm::vec3(-25, 0, -25), glm::vec3(25, wallHeight, -24), wallColor);
-    addBox(boxVerts, glm::vec3(-25, 0, 24), glm::vec3(25, wallHeight, 25), wallColor);
-    addBox(boxVerts, glm::vec3(-25, 0, -25), glm::vec3(-24, wallHeight, 25), wallColor);
-    addBox(boxVerts, glm::vec3(24, 0, -25), glm::vec3(25, wallHeight, 25), wallColor);
-    addBox(boxVerts, glm::vec3(3, 0, 3), glm::vec3(6, 2, 6), glm::vec3(0.80f, 0.45f, 0.12f));
-    addBox(boxVerts, glm::vec3(-6, 0, -3), glm::vec3(-3, 1.5f, -1), glm::vec3(0.18f, 0.55f, 0.85f));
-    addBox(boxVerts, glm::vec3(-8, 0, 6), glm::vec3(-5, 3, 9), glm::vec3(0.40f, 0.70f, 0.30f));
+    addBox(boxVerts, glm::vec3(-1250, 0, -1250), glm::vec3(1250, wallHeight, -1200), wallColor);
+    addBox(boxVerts, glm::vec3(-1250, 0, 1200), glm::vec3(1250, wallHeight, 1250), wallColor);
+    addBox(boxVerts, glm::vec3(-1250, 0, -1250), glm::vec3(-1200, wallHeight, 1250), wallColor);
+    addBox(boxVerts, glm::vec3(1200, 0, -1250), glm::vec3(1250, wallHeight, 1250), wallColor);
+    addBox(boxVerts, glm::vec3(150, 0, 150), glm::vec3(300, 100, 300), glm::vec3(0.80f, 0.45f, 0.12f));
+    addBox(boxVerts, glm::vec3(-300, 0, -150), glm::vec3(-150, 75, -50), glm::vec3(0.18f, 0.55f, 0.85f));
+    addBox(boxVerts, glm::vec3(-400, 0, 300), glm::vec3(-250, 150, 450), glm::vec3(0.40f, 0.70f, 0.30f));
     m_boxMesh.upload(boxVerts);
 }
 
@@ -100,8 +106,18 @@ void Level::destroy() {
 
 void Level::buildFromMap(const map::GeneratedMap& map) {
     m_mapMesh.destroy();
-    map::buildCollision(map, m_world);
+    auto world = std::make_unique<CollisionWorld>();
+    map::buildCollision(map, *world);
+    m_world = std::move(world);
     m_mapMesh.upload(map::buildMesh(map));
+}
+
+void Level::buildFromBsp(const map::Map& bsp) {
+    m_mapMesh.destroy();
+    auto world = std::make_unique<BrushCollisionWorld>();
+    map::buildBspCollision(bsp, *world);
+    m_world = std::move(world);
+    m_mapMesh.upload(map::buildMesh(bsp));
 }
 
 } // namespace ot

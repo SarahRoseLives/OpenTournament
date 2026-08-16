@@ -25,9 +25,9 @@ struct PlayerInput {
 
 class Player {
 public:
-    static constexpr float kHalfWidth = 0.35f;
-    static constexpr float kHalfHeight = 0.9f;
-    static constexpr float kEyeHeight = 1.7f;
+    static constexpr float kHalfWidth = 42.0f;
+    static constexpr float kHalfHeight = 44.0f;
+    static constexpr float kEyeHeight = 64.0f;
 
     void spawn(const glm::vec3& position, float yaw);
 
@@ -46,9 +46,9 @@ public:
     const glm::vec3& velocity() const { return m_velocity; }
 
 private:
-    static constexpr float kSpeed = 6.0f;
-    static constexpr float kGravity = 22.0f;
-    static constexpr float kJumpSpeed = 7.5f;
+    static constexpr float kSpeed = 440.0f;
+    static constexpr float kGravity = 950.0f;
+    static constexpr float kJumpSpeed = 420.0f;
 
     Camera m_camera;
     glm::vec3 m_center{0.0f};

@@ -10,6 +10,7 @@
 #include <glm/glm.hpp>
 
 #include "game/CollisionWorld.h"
+#include "game/ICollisionWorld.h"
 #include "game/Player.h"
 #include "net/NetCommon.h"
 
@@ -53,13 +54,15 @@ private:
     void sendWelcome(ServerPlayer* player);
     void sendMapData(ServerPlayer* player);
     glm::vec3 spawnPointForId(uint32_t id) const;
+    float spawnYawForId(uint32_t id) const;
 
     ENetHost* m_host = nullptr;
-    CollisionWorld m_world;
+    std::unique_ptr<ICollisionWorld> m_world;
     std::vector<std::unique_ptr<ServerPlayer>> m_players;
 
     std::string m_mapText;
     std::vector<glm::vec3> m_spawns;
+    std::vector<float> m_spawnYaws;
 
     uint32_t m_nextId = 1;
     uint32_t m_tick = 0;

@@ -12,17 +12,17 @@ void CollisionWorld::addBox(const glm::vec3& min, const glm::vec3& max) {
 void CollisionWorld::buildDefault() {
     m_boxes.clear();
 
-    addBox(glm::vec3(-25.0f, -1.0f, -25.0f), glm::vec3(25.0f, 0.0f, 25.0f));  // floor
+    addBox(glm::vec3(-1250.0f, -50.0f, -1250.0f), glm::vec3(1250.0f, 0.0f, 1250.0f));  // floor
 
-    const float wallHeight = 4.0f;
-    addBox(glm::vec3(-25, 0, -25), glm::vec3(25, wallHeight, -24));  // north
-    addBox(glm::vec3(-25, 0, 24), glm::vec3(25, wallHeight, 25));    // south
-    addBox(glm::vec3(-25, 0, -25), glm::vec3(-24, wallHeight, 25));  // west
-    addBox(glm::vec3(24, 0, -25), glm::vec3(25, wallHeight, 25));    // east
+    const float wallHeight = 200.0f;
+    addBox(glm::vec3(-1250, 0, -1250), glm::vec3(1250, wallHeight, -1200));  // north
+    addBox(glm::vec3(-1250, 0, 1200), glm::vec3(1250, wallHeight, 1250));    // south
+    addBox(glm::vec3(-1250, 0, -1250), glm::vec3(-1200, wallHeight, 1250));  // west
+    addBox(glm::vec3(1200, 0, -1250), glm::vec3(1250, wallHeight, 1250));    // east
 
-    addBox(glm::vec3(3, 0, 3), glm::vec3(6, 2, 6));        // crate 1
-    addBox(glm::vec3(-6, 0, -3), glm::vec3(-3, 1.5f, -1)); // crate 2
-    addBox(glm::vec3(-8, 0, 6), glm::vec3(-5, 3, 9));      // crate 3
+    addBox(glm::vec3(150, 0, 150), glm::vec3(300, 100, 300));          // crate 1
+    addBox(glm::vec3(-300, 0, -150), glm::vec3(-150, 75, -50));        // crate 2
+    addBox(glm::vec3(-400, 0, 300), glm::vec3(-250, 150, 450));        // crate 3
 }
 
 static bool overlaps(const glm::vec3& center, const glm::vec3& half, const AABB& box) {

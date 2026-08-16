@@ -23,6 +23,8 @@
 #include "game/Weapon.h"
 #include "game/WeaponDef.h"
 #include "input/Input.h"
+#include "map/BspMap.h"
+#include "map/MapFormat.h"
 #include "map/OtMap.h"
 #include "map/QuakeMap.h"
 #include "net/Client.h"
@@ -283,6 +285,22 @@ bool endsWith(const std::string& s, const std::string& suffix) {
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+// Detects the binary BSP .otmap format (magic "OTMP") vs the text procedural
+// .otmap format (plain text).
+bool isBinaryOtMap(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    unsigned char magic[4] = {0, 0, 0, 0};
+    file.read(reinterpret_cast<char*>(magic), 4);
+    const uint32_t v = static_cast<uint32_t>(magic[0]) |
+                       (static_cast<uint32_t>(magic[1]) << 8) |
+                       (static_cast<uint32_t>(magic[2]) << 16) |
+                       (static_cast<uint32_t>(magic[3]) << 24);
+    return v == ot::map::kMagic;
+}
+
 bool loadGeneratedMap(const std::string& path, ot::map::GenParams& params,
                       std::string& name, ot::map::GeneratedMap& generated) {
     const std::string text = readFileText(path);
@@ -346,7 +364,24 @@ int runViewer(const std::string& mapPath) {
     glm::vec3 bmin(1e30f), bmax(-1e30f);
     size_t bad = 0;
 
-    if (endsWith(mapPath, ".otmap")) {
+    if (isBinaryOtMap(mapPath)) {
+        ot::map::Map bsp;
+        if (!ot::map::loadMap(bsp, mapPath)) {
+            std::printf("[ot] failed to load bsp map: %s\n", mapPath.c_str());
+            return 1;
+        }
+        ot::map::TriangleMesh mesh;
+        ot::map::triangulateBsp(bsp, mesh);
+        verts = buildMapVertices(mesh, bsp.materials);
+        for (const auto& p : mesh.positions) {
+            if (std::isnan(p.x) || std::isnan(p.y) || std::isnan(p.z)) { ++bad; continue; }
+            bmin = glm::min(bmin, p);
+            bmax = glm::max(bmax, p);
+        }
+        std::printf("[ot] bsp map: %s, %zu points, %zu nodes, %zu triangles, %zu materials\n",
+                    mapPath.c_str(), bsp.points.size(), bsp.nodes.size(),
+                    mesh.positions.size() / 3, bsp.materials.size());
+    } else if (endsWith(mapPath, ".otmap")) {
         ot::map::GenParams params;
         std::string name;
         ot::map::GeneratedMap generated;
@@ -427,6 +462,9 @@ int runViewer(const std::string& mapPath) {
     ot::Input input;
     input.init();
 
+    std::printf("[ot] fly controls: WASD move, mouse look, Space up, Ctrl down, "
+                "Shift fast, Esc quit\n");
+
     // Build a colored mesh with simple fake lighting.
     ot::Mesh meshObj;
     meshObj.upload(verts);
@@ -436,23 +474,30 @@ int runViewer(const std::string& mapPath) {
     camera.zFar = 20000.0f;
 
     const glm::vec3 center = (bmin + bmax) * 0.5f;
-    camera.position = center + glm::vec3(0.0f, 1200.0f, -1800.0f);
-    {
-        const glm::vec3 dir = glm::normalize(center - camera.position);
-        camera.pitch = std::asin(dir.y);
-        camera.yaw = std::atan2(dir.x, -dir.z);
-    }
+    // Start inside the map at mid-height, facing into it.
+    camera.position = center;
+    camera.yaw = 0.0f;
+    camera.pitch = 0.0f;
 
     Uint64 lastCounter = SDL_GetPerformanceCounter();
     const double counterFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
 
     bool running = true;
+    float logTimer = 0.0f;
     while (running) {
         const Uint64 now = SDL_GetPerformanceCounter();
         float dt = static_cast<float>(static_cast<double>(now - lastCounter) / counterFrequency);
         lastCounter = now;
         if (dt > 0.1f) {
             dt = 0.1f;
+        }
+
+        logTimer -= dt;
+        if (logTimer <= 0.0f) {
+            logTimer = 2.0f;
+            std::printf("[ot] cam (%.1f %.1f %.1f) yaw=%.1f pitch=%.1f\n",
+                        camera.position.x, camera.position.y, camera.position.z,
+                        camera.yaw, camera.pitch);
         }
 
         SDL_Event event;
@@ -470,7 +515,7 @@ int runViewer(const std::string& mapPath) {
 
         const glm::vec2 move = input.moveAxis();
         const Uint8* kb = SDL_GetKeyboardState(nullptr);
-        float speed = kb[SDL_SCANCODE_LSHIFT] ? 2000.0f : 600.0f;
+        float speed = kb[SDL_SCANCODE_LSHIFT] ? 8000.0f : 2000.0f;
         glm::vec3 dir(0.0f);
         dir += camera.forward() * move.y;
         dir += camera.right() * move.x;
@@ -512,7 +557,45 @@ int runWalk(const std::string& mapPath) {
     glm::vec3 spawnPos(0.0f);
     float spawnYaw = 0.0f;
 
-    if (endsWith(mapPath, ".otmap")) {
+    if (isBinaryOtMap(mapPath)) {
+        ot::map::Map bsp;
+        if (!ot::map::loadMap(bsp, mapPath)) {
+            std::printf("[ot] failed to load bsp map: %s\n", mapPath.c_str());
+            return 1;
+        }
+        ot::map::TriangleMesh mesh;
+        ot::map::triangulateBsp(bsp, mesh);
+        auto w = std::make_unique<ot::BrushCollisionWorld>();
+        ot::map::buildBspCollision(bsp, *w);
+        world = std::move(w);
+        verts = buildMapVertices(mesh, bsp.materials);
+        // Spawn at a real PlayerStart if available, else the map center.
+        hasSpawn = true;
+        if (!bsp.spawnPoints.empty()) {
+            const auto& sp = bsp.spawnPoints[0];
+            spawnPos = glm::vec3(sp.x, sp.y, sp.z);
+            spawnYaw = bsp.spawnYaw.empty() ? 0.0f : bsp.spawnYaw[0];
+        } else {
+            glm::vec3 bmin(1e30f), bmax(-1e30f);
+            for (const auto& p : mesh.positions) {
+                bmin = glm::min(bmin, p);
+                bmax = glm::max(bmax, p);
+            }
+            glm::vec3 probe = (bmin + bmax) * 0.5f;
+            probe.y = bmax.y + 50.0f;
+            const ot::RayHit hit = world->raycast(probe, glm::vec3(0.0f, -1.0f, 0.0f), 300000.0f);
+            spawnPos = probe;
+            if (hit.hit) {
+                spawnPos.y = hit.point.y + 0.2f;
+            }
+            spawnYaw = 0.0f;
+        }
+        std::printf("[ot] bsp map: %s, %zu triangles, %zu collision brushes, %zu spawns, spawn (%.1f %.1f %.1f)\n",
+                    mapPath.c_str(), mesh.positions.size() / 3,
+                    static_cast<ot::BrushCollisionWorld*>(world.get())->brushCount(),
+                    bsp.spawnPoints.size(),
+                    spawnPos.x, spawnPos.y, spawnPos.z);
+    } else if (endsWith(mapPath, ".otmap")) {
         ot::map::GenParams params;
         std::string name;
         ot::map::GeneratedMap generated;
@@ -592,7 +675,7 @@ int runWalk(const std::string& mapPath) {
     if (hasSpawn) {
         player.spawn(spawnPos + glm::vec3(0, ot::Player::kHalfHeight, 0), spawnYaw);
     } else {
-        player.spawn(glm::vec3(0, 64, 0), 0.0f);
+        player.spawn(glm::vec3(0, ot::Player::kHalfHeight, 0), 0.0f);
     }
 
     ot::Weapon weapon;
@@ -828,7 +911,7 @@ int runGen(const std::string& seedStr) {
     return 0;
 }
 
-int runGame(const std::string& serverHostArg, uint16_t port) {
+int runGame(const std::string& serverHostArg, uint16_t port, const std::string& mapPath) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::printf("[ot] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -858,15 +941,55 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
     ot::Input input;
     input.init();
 
+    const bool isClient = !serverHostArg.empty();
+    bool mapApplied = false;
+
+#if OT_PLATFORM_WINDOWS
+    if (isClient) {
+        std::freopen("client.log", "w", stderr);
+        std::setvbuf(stderr, nullptr, _IONBF, 0);
+    }
+#endif
+
     ot::Level level;
-    level.build();
+    glm::vec3 offlineSpawn(0.0f, 0.0f, 0.0f);
+    float offlineSpawnYaw = 0.0f;
+    if (!isClient && !mapPath.empty() && isBinaryOtMap(mapPath)) {
+        ot::map::Map bsp;
+        if (ot::map::loadMap(bsp, mapPath)) {
+            level.buildFromBsp(bsp);
+            // Use a real PlayerStart spawn point if available.
+            if (!bsp.spawnPoints.empty()) {
+                const auto& sp = bsp.spawnPoints[0];
+                offlineSpawn = glm::vec3(sp.x, sp.y, sp.z);
+                offlineSpawnYaw = bsp.spawnYaw.empty() ? 0.0f : bsp.spawnYaw[0];
+            } else {
+                glm::vec3 bmin, bmax;
+                ot::map::computeBounds(bsp, bmin, bmax);
+                glm::vec3 probe = (bmin + bmax) * 0.5f;
+                probe.y = bmax.y + 50.0f;
+                const ot::RayHit hit = level.world().raycast(probe, glm::vec3(0.0f, -1.0f, 0.0f), 300000.0f);
+                offlineSpawn = probe;
+                if (hit.hit) {
+                    offlineSpawn.y = hit.point.y + 0.2f;
+                }
+            }
+            mapApplied = true;
+            std::printf("[ot] offline bsp map: %s, %zu nodes, %zu spawns, spawn (%.1f %.1f %.1f)\n",
+                        mapPath.c_str(), bsp.nodes.size(), bsp.spawnPoints.size(),
+                        offlineSpawn.x, offlineSpawn.y, offlineSpawn.z);
+        } else {
+            level.build();
+        }
+    } else {
+        level.build();
+    }
 
     ot::Player player;
-    player.spawn(glm::vec3(0.0f, 2.0f, 12.0f), 0.0f);
+    player.spawn(offlineSpawn + glm::vec3(0.0f, ot::Player::kHalfHeight, 0.0f), offlineSpawnYaw);
 
     ot::Weapon weapon;
 
-    const bool isClient = !serverHostArg.empty();
     std::string host = serverHostArg;
     ot::Client client(player);
     if (isClient) {
@@ -901,7 +1024,6 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
     const double counterFrequency = static_cast<double>(SDL_GetPerformanceFrequency());
 
     bool running = true;
-    bool mapApplied = false;
     int selectedWeapon = 0;
     bool wheelOpen = false;
     int wheelHighlight = 0;
@@ -1009,14 +1131,33 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
             client.update(dt, pi, level.world());
 
             if (client.mapReceived() && !mapApplied) {
-                ot::map::GenParams params;
-                std::string name;
-                if (ot::map::parseOtMapText(client.mapText(), params, name)) {
-                    const ot::map::GeneratedMap generated = ot::map::generate(params);
-                    level.buildFromMap(generated);
-                    SDL_Log("[ot] applied map %s (seed %u)\n", name.c_str(), params.seed);
+                const std::string& mapText = client.mapText();
+                const bool isBsp =
+                    mapText.size() >= 4 &&
+                    (static_cast<uint32_t>(static_cast<unsigned char>(mapText[0])) |
+                     (static_cast<uint32_t>(static_cast<unsigned char>(mapText[1])) << 8) |
+                     (static_cast<uint32_t>(static_cast<unsigned char>(mapText[2])) << 16) |
+                     (static_cast<uint32_t>(static_cast<unsigned char>(mapText[3])) << 24)) ==
+                        ot::map::kMagic;
+                if (isBsp) {
+                    ot::map::Map bsp;
+                    if (ot::map::loadMap(bsp,
+                                         reinterpret_cast<const uint8_t*>(mapText.data()),
+                                         mapText.size())) {
+                        level.buildFromBsp(bsp);
+                        SDL_Log("[ot] applied bsp map (%zu nodes)\n", bsp.nodes.size());
+                        mapApplied = true;
+                    }
+                } else {
+                    ot::map::GenParams params;
+                    std::string name;
+                    if (ot::map::parseOtMapText(mapText, params, name)) {
+                        const ot::map::GeneratedMap generated = ot::map::generate(params);
+                        level.buildFromMap(generated);
+                        SDL_Log("[ot] applied map %s (seed %u)\n", name.c_str(), params.seed);
+                        mapApplied = true;
+                    }
                 }
-                mapApplied = true;
             }
 
             weapon.update(dt, input, player.camera(), level.world(), ot::weaponDef(selectedWeapon));
@@ -1105,7 +1246,7 @@ int runGame(const std::string& serverHostArg, uint16_t port) {
 
 enum class MenuResult { Quit, PlayOffline, JoinServer, GenerateMap };
 
-int runMenu() {
+int runMenu(const std::string& mapPath) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         std::printf("[ot] SDL_Init failed: %s\n", SDL_GetError());
         return 1;
@@ -1193,8 +1334,8 @@ int runMenu() {
     SDL_Quit();
 
     switch (result) {
-        case MenuResult::PlayOffline: return runGame("", ot::net::kDefaultPort);
-        case MenuResult::JoinServer: return runGame(ip, ot::net::kDefaultPort);
+        case MenuResult::PlayOffline: return runGame("", ot::net::kDefaultPort, mapPath);
+        case MenuResult::JoinServer: return runGame(ip, ot::net::kDefaultPort, mapPath);
         case MenuResult::GenerateMap: return runGen("");
         case MenuResult::Quit:
         default: return 0;
@@ -1297,11 +1438,11 @@ int main(int argc, char* argv[]) {
 
     // --- Client / offline (or main menu on Windows) ---
     if (mode == "client") {
-        return runGame(serverHost, port);
+        return runGame(serverHost, port, mapPath);
     }
 #if OT_PLATFORM_WINDOWS
-    return runMenu();
+    return runMenu(mapPath);
 #else
-    return runGame(serverHost, port);
+    return runGame(serverHost, port, mapPath);
 #endif
 }

@@ -12,7 +12,7 @@ namespace {
 constexpr float kAimSpeed = 12.0f;
 constexpr float kTracerLifetime = 0.07f;
 constexpr float kFlashDuration = 0.09f;
-constexpr float kMuzzleOffset = 0.4f;
+constexpr float kMuzzleOffset = 40.0f;
 } // namespace
 
 void Weapon::update(float dt, const Input& input, const Camera& camera, ICollisionWorld& world,

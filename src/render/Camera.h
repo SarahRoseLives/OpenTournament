@@ -12,7 +12,7 @@ public:
     float fov = glm::radians(70.0f);
     float aspect = 1.0f;
     float zNear = 0.1f;
-    float zFar = 200.0f;
+    float zFar = 20000.0f;
 
     glm::vec3 forward() const;
     glm::vec3 right() const;

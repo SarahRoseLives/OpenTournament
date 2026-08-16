@@ -205,6 +205,9 @@ GeneratedMap generate(const GenParams& params) {
 
     const int A = static_cast<int>(params.arena); // integer half-extent
     const int wallH = 4;
+    // World-unit scale: the generator works on a small integer grid and the
+    // output is scaled up to match the player's Unreal-scale dimensions.
+    constexpr int kScale = 50;
 
     // Track XZ footprints so cover and spawns avoid overlapping geometry.
     struct Footprint {
@@ -213,7 +216,8 @@ GeneratedMap generate(const GenParams& params) {
     std::vector<Footprint> footprint;
 
     auto addBox = [&](int x0, int y0, int z0, int x1, int y1, int z1, int mat) {
-        out.boxes.push_back({glm::vec3(x0, y0, z0), glm::vec3(x1, y1, z1), mat});
+        out.boxes.push_back({glm::vec3(x0 * kScale, y0 * kScale, z0 * kScale),
+                             glm::vec3(x1 * kScale, y1 * kScale, z1 * kScale), mat});
         footprint.push_back({x0, z0, x1, z1});
     };
 
@@ -258,7 +262,8 @@ GeneratedMap generate(const GenParams& params) {
 
     // --- Floor and perimeter walls (thickness 1) ---
     // Floor is not registered in the footprint: cover sits on top of it.
-    out.boxes.push_back({glm::vec3(-A, -1, -A), glm::vec3(A, 0, A), kMatFloor});
+    out.boxes.push_back({glm::vec3(-A * kScale, -kScale, -A * kScale),
+                         glm::vec3(A * kScale, 0, A * kScale), kMatFloor});
     addBox(-A, 0, -A, A, wallH, -A + 1, kMatWall);    // z-min
     addBox(-A, 0, A - 1, A, wallH, A, kMatWall);      // z-max
     addBox(-A, 0, -A, -A + 1, wallH, A, kMatWall);    // x-min
@@ -347,7 +352,8 @@ GeneratedMap generate(const GenParams& params) {
     for (int i = 0; i < static_cast<int>(spawnGrid.size()) && i < spawnCount; ++i) {
         const glm::ivec2& s = spawnGrid[i];
         Spawn sp;
-        sp.position = glm::vec3(static_cast<float>(s.x), 0.0f, static_cast<float>(s.y));
+        sp.position = glm::vec3(static_cast<float>(s.x * kScale), 0.0f,
+                                static_cast<float>(s.y * kScale));
         sp.yaw = std::atan2(-static_cast<float>(s.x), static_cast<float>(s.y));
         out.spawns.push_back(sp);
     }

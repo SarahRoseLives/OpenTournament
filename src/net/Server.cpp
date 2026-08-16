@@ -5,7 +5,10 @@
 #include <fstream>
 #include <sstream>
 
+#include "game/BrushCollisionWorld.h"
 #include "game/WeaponDef.h"
+#include "map/BspMap.h"
+#include "map/MapFormat.h"
 #include "map/OtMap.h"
 
 namespace ot {
@@ -40,29 +43,79 @@ bool Server::start(uint16_t port, const std::string& mapPath) {
             ss << file.rdbuf();
             m_mapText = ss.str();
         }
-        if (m_mapText.empty()) {
-            std::printf("[ot] cannot read map %s; using default arena\n", mapPath.c_str());
-            m_world.buildDefault();
-        } else {
-            map::GenParams params;
-            std::string name;
-            if (map::parseOtMapText(m_mapText, params, name)) {
-                const map::GeneratedMap generated = map::generate(params);
-                map::buildCollision(generated, m_world);
-                m_spawns.clear();
-                m_spawns.reserve(generated.spawns.size());
-                for (const auto& s : generated.spawns) {
-                    m_spawns.push_back(s.position);
-                }
-                std::printf("[ot] hosting map %s (seed %u, %zu boxes, %zu spawns)\n",
-                            name.c_str(), params.seed, generated.boxes.size(), m_spawns.size());
-            } else {
-                std::printf("[ot] failed to parse map %s; using default arena\n", mapPath.c_str());
-                m_world.buildDefault();
+    }
+
+    // Detect the binary BSP format (magic "OTMP") vs the text procedural format.
+    const bool isBsp =
+        m_mapText.size() >= 4 &&
+        (static_cast<uint32_t>(static_cast<unsigned char>(m_mapText[0])) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(m_mapText[1])) << 8) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(m_mapText[2])) << 16) |
+         (static_cast<uint32_t>(static_cast<unsigned char>(m_mapText[3])) << 24)) ==
+            map::kMagic;
+
+    if (isBsp) {
+        map::Map bsp;
+        if (map::loadMap(bsp, reinterpret_cast<const uint8_t*>(m_mapText.data()),
+                         m_mapText.size())) {
+            auto world = std::make_unique<BrushCollisionWorld>();
+            map::buildBspCollision(bsp, *world);
+            m_world = std::move(world);
+
+            // Use the real PlayerStart spawn points from the map.
+            m_spawns.clear();
+            m_spawnYaws.clear();
+            for (const auto& sp : bsp.spawnPoints) {
+                m_spawns.push_back(glm::vec3(sp.x, sp.y, sp.z));
             }
+            m_spawnYaws = bsp.spawnYaw;
+            // Fallback: spawn at the map center, on the floor below it.
+            if (m_spawns.empty()) {
+                glm::vec3 bmin, bmax;
+                map::computeBounds(bsp, bmin, bmax);
+                glm::vec3 probe = (bmin + bmax) * 0.5f;
+                probe.y = bmax.y + 50.0f;
+                const RayHit hit = m_world->raycast(probe, glm::vec3(0.0f, -1.0f, 0.0f), 300000.0f);
+                if (hit.hit) {
+                    m_spawns.push_back(glm::vec3(probe.x, hit.point.y + 0.2f, probe.z));
+                } else {
+                    m_spawns.push_back(probe);
+                }
+                m_spawnYaws.push_back(0.0f);
+            }
+            std::printf("[ot] hosting bsp map (%zu nodes, %zu surfs, %zu spawns)\n",
+                        bsp.nodes.size(), bsp.surfaces.size(), m_spawns.size());
+        } else {
+            std::printf("[ot] failed to load bsp map; using default arena\n");
+            auto world = std::make_unique<CollisionWorld>();
+            world->buildDefault();
+            m_world = std::move(world);
+        }
+    } else if (!m_mapText.empty()) {
+        map::GenParams params;
+        std::string name;
+        if (map::parseOtMapText(m_mapText, params, name)) {
+            const map::GeneratedMap generated = map::generate(params);
+            auto world = std::make_unique<CollisionWorld>();
+            map::buildCollision(generated, *world);
+            m_world = std::move(world);
+            m_spawns.clear();
+            m_spawns.reserve(generated.spawns.size());
+            for (const auto& s : generated.spawns) {
+                m_spawns.push_back(s.position);
+            }
+            std::printf("[ot] hosting map %s (seed %u, %zu boxes, %zu spawns)\n",
+                        name.c_str(), params.seed, generated.boxes.size(), m_spawns.size());
+        } else {
+            std::printf("[ot] failed to parse map %s; using default arena\n", mapPath.c_str());
+            auto world = std::make_unique<CollisionWorld>();
+            world->buildDefault();
+            m_world = std::move(world);
         }
     } else {
-        m_world.buildDefault();
+        auto world = std::make_unique<CollisionWorld>();
+        world->buildDefault();
+        m_world = std::move(world);
     }
 
     std::printf("[ot] server listening on port %u\n", port);
@@ -170,7 +223,8 @@ Server::ServerPlayer* Server::createPlayer(ENetPeer* peer) {
     player->peer = peer;
     player->id = m_nextId++;
     player->health = kMaxHealth;
-    player->player.spawn(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0), 0.0f);
+    player->player.spawn(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
+                         spawnYawForId(player->id));
 
     ServerPlayer* raw = player.get();
     peer->data = raw;
@@ -199,14 +253,14 @@ void Server::respawn(ServerPlayer* player) {
     player->health = kMaxHealth;
     player->input.weapon = 0;
     player->player.setState(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
-                            0.0f, 0.0f);
+                            spawnYawForId(player->id), 0.0f);
 }
 
 void Server::step() {
     m_tick++;
 
     for (auto& player : m_players) {
-        player->player.applyInput(player->input, kTick, m_world);
+        player->player.applyInput(player->input, kTick, *m_world);
 
         player->fireCooldown -= kTick;
         if (player->input.fire && player->fireCooldown <= 0.0f) {
@@ -227,7 +281,7 @@ void Server::shoot(ServerPlayer& shooter) {
     const glm::vec3 dir = shooter.player.camera().forward();
     const glm::vec3 origin = shooter.player.camera().position + dir * 0.4f;
 
-    RayHit worldHit = m_world.raycast(origin, dir, def.range);
+    RayHit worldHit = m_world->raycast(origin, dir, def.range);
 
     ServerPlayer* victim = nullptr;
     float victimDistance = def.range;
@@ -323,6 +377,13 @@ glm::vec3 Server::spawnPointForId(uint32_t id) const {
         return glm::vec3(0.0f, 0.0f, 12.0f);
     }
     return m_spawns[id % m_spawns.size()];
+}
+
+float Server::spawnYawForId(uint32_t id) const {
+    if (m_spawnYaws.empty()) {
+        return 0.0f;
+    }
+    return m_spawnYaws[id % m_spawnYaws.size()];
 }
 
 } // namespace ot

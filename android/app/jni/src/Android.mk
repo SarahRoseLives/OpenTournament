@@ -28,7 +28,9 @@ LOCAL_SRC_FILES := \
     ../../../../src/net/Server.cpp \
     ../../../../src/net/Client.cpp \
     ../../../../src/map/QuakeMap.cpp \
-    ../../../../src/map/OtMap.cpp
+    ../../../../src/map/OtMap.cpp \
+    ../../../../src/map/MapFormat.cpp \
+    ../../../../src/map/BspMap.cpp
 
 LOCAL_SHARED_LIBRARIES := SDL2
 LOCAL_STATIC_LIBRARIES := enet

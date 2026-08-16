@@ -16,7 +16,7 @@ namespace ot {
 
 using namespace net;
 
-class CollisionWorld;
+class ICollisionWorld;
 
 struct RemoteSnapshot {
     double time = 0.0;
@@ -44,7 +44,7 @@ public:
     void disconnect();
     bool isConnected() const { return m_connected; }
 
-    void update(float dt, const PlayerInput& baseInput, CollisionWorld& world);
+    void update(float dt, const PlayerInput& baseInput, ICollisionWorld& world);
 
     uint32_t localId() const { return m_localId; }
     int localHealth() const { return m_localHealth; }
@@ -72,7 +72,7 @@ private:
     void interpolate();
 
     Player& m_player;
-    CollisionWorld* m_world = nullptr;
+    ICollisionWorld* m_world = nullptr;
 
     ENetHost* m_host = nullptr;
     ENetPeer* m_server = nullptr;

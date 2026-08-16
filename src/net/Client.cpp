@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "game/CollisionWorld.h"
+#include "game/ICollisionWorld.h"
 
 namespace ot {
 
@@ -70,7 +71,7 @@ void Client::disconnect() {
     }
 }
 
-void Client::update(float dt, const PlayerInput& baseInput, CollisionWorld& world) {
+void Client::update(float dt, const PlayerInput& baseInput, ICollisionWorld& world) {
     m_world = &world;
     m_time += dt;
 

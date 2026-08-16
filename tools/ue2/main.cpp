@@ -28,6 +28,105 @@ static uint32_t rdu32(const uint8_t* p) {
            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
+static uint16_t rdu16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0] | (p[1] << 8));
+}
+
+static int32_t findNameIndex(const Package& pkg, const char* name) {
+    for (uint32_t i = 0; i < pkg.nameCount(); ++i) {
+        if (pkg.name(static_cast<int32_t>(i)) == name) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// A parsed PlayerStart's spawn data (UE2 Z-up coordinates, rotator yaw units).
+struct PlayerStartData {
+    float x = 0, y = 0, z = 0;
+    int32_t yaw = 0;
+};
+
+// Parses a PlayerStart actor's serialized data: the execution-stack state frame
+// (RF_HasStack) followed by the tagged-property stream, extracting Location and
+// Rotation.
+static bool parsePlayerStart(const Package& pkg, const uint8_t* base, size_t baseSize,
+                             const uint8_t* p, int32_t size, int32_t nameLoc,
+                             int32_t nameVec, int32_t nameRot, int32_t nameRotator,
+                             PlayerStartData& out) {
+    const uint8_t* hardEnd = base + baseSize;
+    const uint8_t* end = p + size;
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+
+    // State frame: Node, StateNode, ProbeMask(8), LatentAction(4), Offset.
+    const int32_t node = Package::readCompact(p, end);
+    Package::readCompact(p, end);  // StateNode
+    p += 8;                        // ProbeMask (QWORD)
+    p += 4;                        // LatentAction (INT)
+    if (node != 0) {
+        Package::readCompact(p, end);  // Offset
+    }
+
+    bool haveLoc = false;
+    while (p + 2 <= end) {
+        const int32_t name = Package::readCompact(p, end);
+        if (name == 0) {
+            break;
+        }
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        int32_t item = -1;
+        if (typ == 10) {  // StructProperty: ItemName comes before the size.
+            item = Package::readCompact(p, end);
+        }
+        const uint8_t sc = info & 0x70;
+        int32_t vsize;
+        if (sc == 0x00) {
+            vsize = 1;
+        } else if (sc == 0x10) {
+            vsize = 2;
+        } else if (sc == 0x20) {
+            vsize = 4;
+        } else if (sc == 0x30) {
+            vsize = 12;
+        } else if (sc == 0x40) {
+            vsize = 16;
+        } else if (sc == 0x50) {
+            vsize = *p++;
+        } else if (sc == 0x60) {
+            vsize = rdu16(p);
+            p += 2;
+        } else {
+            vsize = rdi32(p);
+            p += 4;
+        }
+        if ((info & 0x80) && typ != 3) {  // array index (non-bool)
+            const uint8_t b = *p++;
+            if (b & 0x80) {
+                p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+        }
+
+        if (name == nameLoc && typ == 10 && item == nameVec && p + 12 <= end) {
+            out.x = rdFloat(p);
+            out.y = rdFloat(p + 4);
+            out.z = rdFloat(p + 8);
+            p += 12;
+            haveLoc = true;
+        } else if (name == nameRot && typ == 10 && item == nameRotator && p + 12 <= end) {
+            out.yaw = rdi32(p + 4);  // Rotator = (Pitch, Yaw, Roll)
+            p += 12;
+        } else if (typ == 3) {
+            // bool: value is stored in the info byte's array flag, no bytes follow.
+        } else {
+            p += vsize;
+        }
+    }
+    return haveLoc;
+}
+
 static void usage() {
     std::fprintf(stderr, "usage: ue2tool dump <file.ut2>\n");
     std::fprintf(stderr, "       ue2tool names <file.ut2> <start> <count>\n");
@@ -218,81 +317,119 @@ int main(int argc, char** argv) {
                     pkg.exportName(modelIdx).c_str(), m.serialSize, m.serialOffset);
 
         const uint8_t* base = pkg.data();
-        const uint8_t* end = base + pkg.size();
         const uint8_t* p = base + m.serialOffset;
-        const uint8_t* stop = p + m.serialSize;
+        const uint8_t* modelEnd = p + m.serialSize;
 
-        // UModel::Serialize (UE2/UT2004). Empirically a 42-byte leading run of
-        // zero fields, then: Vectors, Points, Nodes, Surfs, Verts,
-        // NumSharedSides, RootOutside, RootInside.
+        auto readU64 = [&](const uint8_t* q) {
+            return static_cast<uint64_t>(rdu32(q)) | (static_cast<uint64_t>(rdu32(q + 4)) << 32);
+        };
+
+        // UModel::Serialize (UT2004): 42-byte header (Super + Bounds), then
+        // Vectors, Points, Nodes, Surfs, Verts, NumSharedSides, NumZones, ...
+        // FBspNode uses compact (variable-length) indices and a BYTE NodeFlags.
         p += 42;
 
-        const int32_t vectorCount = Package::readCompact(p, stop);
+        const int32_t vectorCount = Package::readCompact(p, modelEnd);
         std::vector<ot::map::Vec3> vectors(vectorCount);
-        for (int32_t i = 0; i < vectorCount && p + 12 <= stop; ++i) {
+        for (int32_t i = 0; i < vectorCount && p + 12 <= modelEnd; ++i) {
             vectors[i].x = rdFloat(p); vectors[i].y = rdFloat(p + 4); vectors[i].z = rdFloat(p + 8);
             p += 12;
         }
 
-        const int32_t pointCount = Package::readCompact(p, stop);
+        const int32_t pointCount = Package::readCompact(p, modelEnd);
         std::vector<ot::map::Vec3> points(pointCount);
-        for (int32_t i = 0; i < pointCount && p + 12 <= stop; ++i) {
+        for (int32_t i = 0; i < pointCount && p + 12 <= modelEnd; ++i) {
             points[i].x = rdFloat(p); points[i].y = rdFloat(p + 4); points[i].z = rdFloat(p + 8);
             p += 12;
         }
 
-        const int32_t nodeCount = Package::readCompact(p, stop);
-        struct Node { float px, py, pz, pw; int32_t vertPool, surf, vertex, cb; int8_t zone[2], leaf[2]; uint8_t nv, flags; };
+        // FBspNode::operator<< (UT2004): Plane, ZoneMask, NodeFlags(BYTE), then
+        // 7 compact indices, ExclusiveSphereBound(FSphere), iZone, NumVertices,
+        // iLeaf, iSection, iFirstVertex, iLightMap.
+        struct Node {
+            float plane[4];
+            uint64_t zoneMask;
+            uint8_t flags;
+            int32_t vertPool, surf, back, front, iplane, collBound, renderBound;
+            float sphere[4];
+            uint8_t zone[2];
+            uint8_t numVertices;
+            int32_t leaf[2];
+            int32_t iSection, iFirstVertex, iLightMap;
+        };
+
+        const int32_t nodeCount = Package::readCompact(p, modelEnd);
         std::vector<Node> nodes(nodeCount);
-        for (int32_t i = 0; i < nodeCount && p + 38 <= stop; ++i) {
+        for (int32_t i = 0; i < nodeCount && p + 24 <= modelEnd; ++i) {
             Node& n = nodes[i];
-            n.px = rdFloat(p); n.py = rdFloat(p + 4); n.pz = rdFloat(p + 8); n.pw = rdFloat(p + 12);
-            n.vertPool = rdi32(p + 16); n.surf = rdi32(p + 20); n.vertex = rdi32(p + 24); n.cb = rdi32(p + 28);
-            n.zone[0] = static_cast<int8_t>(p[32]); n.zone[1] = static_cast<int8_t>(p[33]);
-            n.leaf[0] = static_cast<int8_t>(p[34]); n.leaf[1] = static_cast<int8_t>(p[35]);
-            n.nv = p[36]; n.flags = p[37];
-            p += 38;
+            for (int k = 0; k < 4; ++k) n.plane[k] = rdFloat(p + k * 4);
+            p += 16;
+            n.zoneMask = readU64(p); p += 8;
+            n.flags = p[0]; p += 1;
+            n.vertPool = Package::readCompact(p, modelEnd);
+            n.surf = Package::readCompact(p, modelEnd);
+            n.back = Package::readCompact(p, modelEnd);
+            n.front = Package::readCompact(p, modelEnd);
+            n.iplane = Package::readCompact(p, modelEnd);
+            n.collBound = Package::readCompact(p, modelEnd);
+            n.renderBound = Package::readCompact(p, modelEnd);
+            for (int k = 0; k < 4; ++k) n.sphere[k] = rdFloat(p + k * 4);
+            p += 16;
+            n.zone[0] = p[0]; n.zone[1] = p[1]; p += 2;
+            n.numVertices = p[0]; p += 1;
+            n.leaf[0] = rdi32(p); n.leaf[1] = rdi32(p + 4); p += 8;
+            n.iSection = rdi32(p); n.iFirstVertex = rdi32(p + 4); n.iLightMap = rdi32(p + 8);
+            p += 12;
         }
 
-        const int32_t surfCount = Package::readCompact(p, stop);
-        struct Surf { int32_t mat; uint32_t poly; int32_t pBase; int32_t nNormal, nTexU, nTexV; int32_t brush, actor; };
+        // FBspSurf::operator<< (UT2004): Material, PolyFlags, pBase, vNormal,
+        // vTextureU, vTextureV, iBrushPoly, Actor, Plane, LightMapScale.
+        struct Surf {
+            int32_t material;
+            uint32_t flags;
+            int32_t pBase, vNormal, vTextureU, vTextureV, iBrushPoly, owner;
+            float plane[4];
+            float lightMapScale;
+        };
+        const int32_t surfCount = Package::readCompact(p, modelEnd);
         std::vector<Surf> surfs(surfCount);
-        for (int32_t i = 0; i < surfCount && p + 52 <= stop; ++i) {
-            surfs[i].mat = rdi32(p);
-            surfs[i].poly = rdu32(p + 4);
-            surfs[i].pBase = rdi32(p + 8);
-            surfs[i].nNormal = rdi32(p + 12);
-            surfs[i].nTexU = rdi32(p + 16);
-            surfs[i].nTexV = rdi32(p + 20);
-            surfs[i].brush = rdi32(p + 24);
-            surfs[i].actor = rdi32(p + 28);
-            // Plane (16 bytes) at +32..+47
-            p += 52;
+        for (int32_t i = 0; i < surfCount && p + 8 <= modelEnd; ++i) {
+            Surf& s = surfs[i];
+            s.material = Package::readCompact(p, modelEnd);
+            s.flags = rdu32(p); p += 4;
+            s.pBase = Package::readCompact(p, modelEnd);
+            s.vNormal = Package::readCompact(p, modelEnd);
+            s.vTextureU = Package::readCompact(p, modelEnd);
+            s.vTextureV = Package::readCompact(p, modelEnd);
+            s.iBrushPoly = Package::readCompact(p, modelEnd);
+            s.owner = Package::readCompact(p, modelEnd);
+            for (int k = 0; k < 4; ++k) s.plane[k] = rdFloat(p + k * 4);
+            p += 16;
+            s.lightMapScale = rdFloat(p); p += 4;
         }
 
-        const int32_t vertCount = Package::readCompact(p, stop);
+        // FVert::operator<< (UT2004): AR_INDEX(pVertex) << AR_INDEX(iSide).
         struct Vert { int32_t pi, side; };
+        const int32_t vertCount = Package::readCompact(p, modelEnd);
         std::vector<Vert> verts(vertCount);
-        for (int32_t i = 0; i < vertCount && p + 8 <= stop; ++i) {
-            verts[i].pi = rdi32(p);
-            verts[i].side = rdi32(p + 4);
-            p += 8;
+        for (int32_t i = 0; i < vertCount && p < modelEnd; ++i) {
+            verts[i].pi = Package::readCompact(p, modelEnd);
+            verts[i].side = Package::readCompact(p, modelEnd);
         }
 
         const long consumed = p - (base + m.serialOffset);
         std::printf("vectors=%d points=%d nodes=%d surfs=%d verts=%d consumed=%ld (of %d)\n",
                     vectorCount, pointCount, nodeCount, surfCount, vertCount, consumed, m.serialSize);
 
-        // Triangulate. node.iVertPool indexes into Verts; FVert.pVertex into Points.
-        std::vector<ot::map::Vec3> triVerts;      // triangle vertices (dedup via points)
-        std::vector<int32_t> triPointIndex;       // point index per triangle vertex
-        std::vector<int32_t> triSurf;             // surface index per triangle
+        // Triangulate. node.vertPool indexes into Verts; FVert.pVertex into Points.
+        std::vector<int32_t> triPointIndex;
+        std::vector<int32_t> triSurf;
         size_t bad = 0;
         for (const auto& n : nodes) {
-            if (n.nv < 3) continue;
+            if (n.numVertices < 3) continue;
             std::vector<int32_t> polyPointIdx;
             bool ok = true;
-            for (uint8_t k = 0; k < n.nv; ++k) {
+            for (uint8_t k = 0; k < n.numVertices; ++k) {
                 const int32_t vi = n.vertPool + k;
                 if (vi < 0 || vi >= vertCount) { ok = false; ++bad; break; }
                 const int32_t pi = verts[vi].pi;
@@ -309,23 +446,56 @@ int main(int argc, char** argv) {
         }
         std::printf("triangles=%zu bad=%zu\n", triPointIndex.size() / 3, bad);
 
+        // Extract PlayerStart spawn points from the level's actor list.
+        const int32_t nameLoc = findNameIndex(pkg, "Location");
+        const int32_t nameVec = findNameIndex(pkg, "Vector");
+        const int32_t nameRot = findNameIndex(pkg, "Rotation");
+        const int32_t nameRotator = findNameIndex(pkg, "Rotator");
+        std::vector<PlayerStartData> spawns;
+        if (nameLoc >= 0 && nameVec >= 0 && nameRot >= 0 && nameRotator >= 0) {
+            for (int i = 0; i < pkg.exportCount(); ++i) {
+                const std::string cls = pkg.exportClass(i);
+                if (cls != "PlayerStart" && cls != "xPlayerStart") {
+                    continue;
+                }
+                const auto& e = pkg.exp(i);
+                if (e.serialSize <= 0) {
+                    continue;
+                }
+                PlayerStartData sd;
+                if (parsePlayerStart(pkg, base, pkg.size(), base + e.serialOffset,
+                                     e.serialSize, nameLoc, nameVec, nameRot,
+                                     nameRotator, sd)) {
+                    spawns.push_back(sd);
+                }
+            }
+        }
+        std::printf("player starts=%zu\n", spawns.size());
+
         if (!wantObj && outPath.empty()) {
             return 0;
         }
 
-        // Resolve material names.
         std::vector<std::string> matNames(surfCount);
         for (int32_t i = 0; i < surfCount; ++i) {
-            matNames[i] = pkg.resolveIndex(surfs[i].mat);
+            matNames[i] = pkg.resolveIndex(surfs[i].material);
         }
 
         if (wantObj) {
-            std::string objPath = outPath.empty() ? "out.obj" : outPath;
+            std::string objPath = "out.obj";
+            if (!outPath.empty()) {
+                objPath = outPath;
+                const size_t dot = objPath.find_last_of('.');
+                if (dot != std::string::npos) {
+                    objPath = objPath.substr(0, dot) + ".obj";
+                }
+            }
             FILE* f = std::fopen(objPath.c_str(), "wb");
             if (!f) { std::fprintf(stderr, "cannot write %s\n", objPath.c_str()); return 1; }
             std::fprintf(f, "# OpenTournament UE2 BSP export\n");
             for (const auto& v : points) {
-                std::fprintf(f, "v %f %f %f\n", v.x, v.y, v.z);
+                // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
+                std::fprintf(f, "v %f %f %f\n", v.x, v.z, v.y);
             }
             int32_t lastSurf = -1;
             for (size_t i = 0; i + 2 < triPointIndex.size(); i += 3) {
@@ -341,31 +511,68 @@ int main(int argc, char** argv) {
             std::printf("wrote %s\n", objPath.c_str());
         }
 
-        if (!outPath.empty() && outPath != (wantObj ? outPath : "")) {
+        if (!outPath.empty()) {
+            // Deduplicate materials and map each surface to its material index.
+            std::vector<std::string> materials;
+            std::vector<int32_t> surfMat(surfCount);
+            for (int32_t i = 0; i < surfCount; ++i) {
+                const std::string& name = matNames[i];
+                int32_t idx = -1;
+                for (size_t k = 0; k < materials.size(); ++k) {
+                    if (materials[k] == name) { idx = static_cast<int32_t>(k); break; }
+                }
+                if (idx < 0) { idx = static_cast<int32_t>(materials.size()); materials.push_back(name); }
+                surfMat[i] = idx;
+            }
+
             ot::map::Map map;
             std::strncpy(map.name, "DM-Rankin", sizeof(map.name) - 1);
-            map.points = points;
+            // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
+            map.points.reserve(points.size());
+            for (const auto& v : points) {
+                map.points.push_back({v.x, v.z, v.y});
+            }
             for (const auto& n : nodes) {
                 ot::map::BspNode bn;
-                bn.planeX = n.px; bn.planeY = n.py; bn.planeZ = n.pz; bn.planeW = n.pw;
-                bn.vertPool = n.vertPool; bn.surf = n.surf; bn.vertex = n.vertex;
-                bn.collisionBound = n.cb;
-                bn.zone[0] = n.zone[0]; bn.zone[1] = n.zone[1];
-                bn.leaf[0] = n.leaf[0]; bn.leaf[1] = n.leaf[1];
-                bn.numVertices = n.nv; bn.nodeFlags = n.flags;
+                bn.planeX = n.plane[0]; bn.planeY = n.plane[2]; bn.planeZ = n.plane[1]; bn.planeW = n.plane[3];
+                bn.vertPool = n.vertPool; bn.surf = n.surf; bn.vertex = n.vertPool;
+                bn.collisionBound = n.collBound;
+                bn.zone[0] = static_cast<int8_t>(n.zone[0]); bn.zone[1] = static_cast<int8_t>(n.zone[1]);
+                bn.leaf[0] = static_cast<int8_t>(n.leaf[0]); bn.leaf[1] = static_cast<int8_t>(n.leaf[1]);
+                bn.numVertices = n.numVertices; bn.nodeFlags = n.flags;
                 map.nodes.push_back(bn);
             }
             for (const auto& v : verts) {
                 ot::map::BspVert bv; bv.pointIndex = v.pi; bv.side = v.side;
                 map.verts.push_back(bv);
             }
-            for (const auto& s : surfs) {
+            for (int32_t i = 0; i < surfCount; ++i) {
+                const Surf& s = surfs[i];
                 ot::map::BspSurface bs;
-                bs.materialIndex = s.mat; bs.polyFlags = s.poly; bs.pBase = s.pBase;
-                bs.brushPoly = s.brush; bs.actor = s.actor;
+                bs.materialIndex = surfMat[i]; bs.polyFlags = s.flags; bs.pBase = s.pBase;
+                if (s.vNormal >= 0 && s.vNormal < vectorCount) {
+                    bs.normalX = vectors[s.vNormal].x; bs.normalY = vectors[s.vNormal].z; bs.normalZ = vectors[s.vNormal].y;
+                }
+                if (s.vTextureU >= 0 && s.vTextureU < vectorCount) {
+                    bs.texUX = vectors[s.vTextureU].x; bs.texUY = vectors[s.vTextureU].z; bs.texUZ = vectors[s.vTextureU].y;
+                }
+                if (s.vTextureV >= 0 && s.vTextureV < vectorCount) {
+                    bs.texVX = vectors[s.vTextureV].x; bs.texVY = vectors[s.vTextureV].z; bs.texVZ = vectors[s.vTextureV].y;
+                }
+                bs.brushPoly = s.iBrushPoly; bs.actor = s.owner;
+                bs.planeX = s.plane[0]; bs.planeY = s.plane[2]; bs.planeZ = s.plane[1]; bs.planeW = s.plane[3];
                 map.surfaces.push_back(bs);
             }
-            map.materials = matNames;
+            map.materials = materials;
+
+            // Player starts: UE2 Z-up -> our Y-up (x, y, z) -> (x, z, y), and
+            // rotator yaw units (65536 = full turn) -> radians (+90 deg remap).
+            for (const auto& sd : spawns) {
+                map.spawnPoints.push_back({sd.x, sd.z, sd.y});
+                map.spawnYaw.push_back(static_cast<float>(sd.yaw) * (6.28318531f / 65536.0f) +
+                                       1.57079633f);
+            }
+
             if (ot::map::saveMap(map, outPath)) {
                 std::printf("wrote map %s\n", outPath.c_str());
             } else {

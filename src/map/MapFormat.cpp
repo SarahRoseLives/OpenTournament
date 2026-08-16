@@ -208,8 +208,16 @@ bool saveMap(const Map& map, const std::string& path) {
     const uint32_t totalSize = static_cast<uint32_t>(full.size());
     const uint32_t crc = crc32(full.data() + kHeaderSize, full.size() - kHeaderSize);
 
-    patch(8, totalSize);
-    patch(12, crc);
+    // Patch the total size and CRC into the assembled buffer (not `file`, which
+    // was already copied into `full`).
+    auto patchFull = [&](size_t off, uint32_t v) {
+        full[off] = static_cast<uint8_t>(v & 0xff);
+        full[off + 1] = static_cast<uint8_t>((v >> 8) & 0xff);
+        full[off + 2] = static_cast<uint8_t>((v >> 16) & 0xff);
+        full[off + 3] = static_cast<uint8_t>((v >> 24) & 0xff);
+    };
+    patchFull(8, totalSize);
+    patchFull(12, crc);
 
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) {
@@ -235,8 +243,13 @@ bool loadMap(Map& map, const std::string& path) {
     std::vector<uint8_t> buf(static_cast<size_t>(sz));
     std::fread(buf.data(), 1, buf.size(), f);
     std::fclose(f);
+    return loadMap(map, buf.data(), buf.size());
+}
 
-    Reader r(buf.data(), buf.size());
+bool loadMap(Map& map, const uint8_t* data, size_t bufSize) {
+    const uint8_t* buf = data;
+
+    Reader r(buf, bufSize);
     if (r.u32() != kMagic) {
         return false;
     }
@@ -244,23 +257,23 @@ bool loadMap(Map& map, const std::string& path) {
     (void)version;
     const uint32_t totalSize = r.u32();
     const uint32_t crc = r.u32();
-    if (totalSize != buf.size()) {
+    if (totalSize != bufSize) {
         return false;
     }
-    if (crc32(buf.data() + kHeaderSize, buf.size() - kHeaderSize) != crc) {
+    if (crc32(buf + kHeaderSize, bufSize - kHeaderSize) != crc) {
         return false;
     }
 
-    std::memcpy(map.name, buf.data() + 16, 64);
+    std::memcpy(map.name, buf + 16, 64);
     map.name[63] = '\0';
 
-    Reader table(buf.data() + kHeaderSize, buf.size() - kHeaderSize);
+    Reader table(buf + kHeaderSize, bufSize - kHeaderSize);
     const uint32_t sectionCount = table.u32();
     for (uint32_t i = 0; i < sectionCount; ++i) {
         const uint32_t id = table.u32();
         const uint32_t offset = table.u32();
         const uint32_t size = table.u32();
-        Reader s(buf.data() + offset, size);
+        Reader s(buf + offset, size);
 
         if (id == static_cast<uint32_t>(SectionId::Geometry)) {
             const uint32_t pointCount = s.u32();

@@ -11,7 +11,7 @@ struct WeaponDef {
 
 // Weapon list. Index 0 is the default/starting weapon.
 inline const WeaponDef kWeapons[] = {
-    {"RIFLE", 34, 0.12f, 300.0f},
+    {"RIFLE", 34, 0.12f, 20000.0f},
 };
 
 inline int weaponCount() {

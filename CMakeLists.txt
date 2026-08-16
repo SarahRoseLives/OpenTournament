@@ -37,6 +37,8 @@ add_executable(opentournament
     src/net/Client.cpp
     src/map/QuakeMap.cpp
     src/map/OtMap.cpp
+    src/map/MapFormat.cpp
+    src/map/BspMap.cpp
 )
 
 target_include_directories(opentournament PRIVATE
