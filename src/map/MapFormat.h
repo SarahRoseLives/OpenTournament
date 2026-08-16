@@ -19,17 +19,19 @@
 //   1 = GEOMETRY (BSP: points, nodes, verts, surfaces)
 //   2 = PLAYER_STARTS (count, then per start: pos(3f) + yaw(1f))
 //   3 = MATERIALS (count, then per material: u32 len + utf8 bytes)
+//   4 = TEXTURES (count, then per texture: name len + name, u32 w, u32 h, u32 rgba bytes, rgba data)
 
 namespace ot::map {
 
 constexpr uint32_t kMagic = 0x4F544D50u;
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr uint32_t kHeaderSize = 80;
 
 enum class SectionId : uint32_t {
     Geometry = 1,
     PlayerStarts = 2,
     Materials = 3,
+    Textures = 4,
 };
 
 struct Vec3 {
@@ -51,15 +53,18 @@ struct BspNode {
     uint8_t nodeFlags = 0;
 };
 
-// BSP vertex reference (mirrors UE2 FVert).
+// BSP vertex reference (mirrors UE2 FVert), plus a texture coordinate.
 struct BspVert {
     int32_t pointIndex = 0; // index into the vertex pool (points)
     int32_t side = 0;
+    float u = 0.0f;
+    float v = 0.0f;
 };
 
 // BSP surface (mirrors UE2 FBspSurf).
 struct BspSurface {
     int32_t materialIndex = -1; // index into materials
+    int32_t textureIndex = -1;  // index into textures (-1 = none)
     uint32_t polyFlags = 0;
     int32_t pBase = 0;          // vertex index for UV origin
     float normalX = 0, normalY = 0, normalZ = 0;
@@ -68,6 +73,14 @@ struct BspSurface {
     int32_t brushPoly = 0;
     int32_t actor = 0;
     float planeX = 0, planeY = 0, planeZ = 0, planeW = 0;
+};
+
+// A decoded texture (RGBA8).
+struct TextureData {
+    std::string name;
+    int32_t width = 0;
+    int32_t height = 0;
+    std::vector<uint8_t> rgba;
 };
 
 struct Map {
@@ -79,6 +92,7 @@ struct Map {
     std::vector<Vec3> spawnPoints;
     std::vector<float> spawnYaw;
     std::vector<std::string> materials;
+    std::vector<TextureData> textures;
 };
 
 uint32_t crc32(const uint8_t* data, size_t size);

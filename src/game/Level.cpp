@@ -7,6 +7,7 @@
 #include "map/BspMap.h"
 #include "map/MapFormat.h"
 #include "map/OtMap.h"
+#include "render/GLHeaders.h"
 
 namespace ot {
 
@@ -16,6 +17,8 @@ void pushVertex(std::vector<float>& verts, const glm::vec3& pos, const glm::vec3
     verts.push_back(pos.x);
     verts.push_back(pos.y);
     verts.push_back(pos.z);
+    verts.push_back(0.0f);
+    verts.push_back(0.0f);
     verts.push_back(color.r);
     verts.push_back(color.g);
     verts.push_back(color.b);
@@ -102,6 +105,10 @@ void Level::destroy() {
     m_floorMesh.destroy();
     m_boxMesh.destroy();
     m_mapMesh.destroy();
+    if (m_mapTexture) {
+        glDeleteTextures(1, &m_mapTexture);
+        m_mapTexture = 0;
+    }
 }
 
 void Level::buildFromMap(const map::GeneratedMap& map) {
@@ -114,10 +121,29 @@ void Level::buildFromMap(const map::GeneratedMap& map) {
 
 void Level::buildFromBsp(const map::Map& bsp) {
     m_mapMesh.destroy();
+    if (m_mapTexture) {
+        glDeleteTextures(1, &m_mapTexture);
+        m_mapTexture = 0;
+    }
     auto world = std::make_unique<BrushCollisionWorld>();
     map::buildBspCollision(bsp, *world);
     m_world = std::move(world);
-    m_mapMesh.upload(map::buildMesh(bsp));
+
+    map::TextureAtlas atlas;
+    map::buildAtlas(bsp, atlas);
+    if (!atlas.rgba.empty()) {
+        glGenTextures(1, &m_mapTexture);
+        glBindTexture(GL_TEXTURE_2D, m_mapTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlas.width, atlas.height, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, atlas.rgba.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        m_mapMesh.upload(map::buildMesh(bsp, &atlas));
+    } else {
+        m_mapMesh.upload(map::buildMesh(bsp, nullptr));
+    }
 }
 
 } // namespace ot

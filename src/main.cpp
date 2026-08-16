@@ -47,6 +47,8 @@ void pushVertex(std::vector<float>& v, const glm::vec3& p, const glm::vec3& c) {
     v.push_back(p.x);
     v.push_back(p.y);
     v.push_back(p.z);
+    v.push_back(0.0f);
+    v.push_back(0.0f);
     v.push_back(c.r);
     v.push_back(c.g);
     v.push_back(c.b);
@@ -100,6 +102,27 @@ std::vector<float> buildCrosshair(float size, const glm::vec3& color) {
     pushQuad2D(v, -length, -thickness, length, thickness, color);
     pushQuad2D(v, -thickness, -length, thickness, length, color);
     return v;
+}
+
+// Renders a full-screen "loading" message and presents it immediately, so the
+// player sees feedback during a synchronous map load.
+void drawLoadingScreen(ot::Renderer& renderer, const std::string& text) {
+    const glm::vec3 titleColor(0.85f, 0.90f, 0.95f);
+    const glm::vec3 hintColor(0.45f, 0.50f, 0.58f);
+    std::vector<float> verts;
+    const float titleScale = 0.12f;
+    ot::buildText(verts, text, -ot::textWidth(text, titleScale) * 0.5f, 0.04f,
+                  titleScale, titleColor);
+    const char* hint = "PLEASE WAIT";
+    const float hintScale = 0.06f;
+    ot::buildText(verts, hint, -ot::textWidth(hint, hintScale) * 0.5f, -0.16f,
+                  hintScale, hintColor);
+    ot::Mesh mesh;
+    mesh.upload(verts);
+    renderer.beginFrame();
+    renderer.drawOverlay(mesh);
+    renderer.endFrame();
+    mesh.destroy();
 }
 
 std::vector<float> buildHealthBar(float fraction) {
@@ -330,7 +353,7 @@ std::vector<float> buildMapVertices(const ot::map::TriangleMesh& mesh,
                                     const std::vector<std::string>& materials) {
     const glm::vec3 lightDir = glm::normalize(glm::vec3(0.5f, 1.0f, 0.35f));
     std::vector<float> verts;
-    verts.reserve(mesh.positions.size() * 6);
+    verts.reserve(mesh.positions.size() * 8);
     for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
         const glm::vec3& p0 = mesh.positions[i];
         const glm::vec3& p1 = mesh.positions[i + 1];
@@ -347,6 +370,8 @@ std::vector<float> buildMapVertices(const ot::map::TriangleMesh& mesh,
             verts.push_back(p->x);
             verts.push_back(p->y);
             verts.push_back(p->z);
+            verts.push_back(0.0f);
+            verts.push_back(0.0f);
             verts.push_back(color.r);
             verts.push_back(color.g);
             verts.push_back(color.b);
@@ -955,6 +980,7 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
     glm::vec3 offlineSpawn(0.0f, 0.0f, 0.0f);
     float offlineSpawnYaw = 0.0f;
     if (!isClient && !mapPath.empty() && isBinaryOtMap(mapPath)) {
+        drawLoadingScreen(renderer, "LOADING MAP");
         ot::map::Map bsp;
         if (ot::map::loadMap(bsp, mapPath)) {
             level.buildFromBsp(bsp);
@@ -1140,6 +1166,7 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
                      (static_cast<uint32_t>(static_cast<unsigned char>(mapText[3])) << 24)) ==
                         ot::map::kMagic;
                 if (isBsp) {
+                    drawLoadingScreen(renderer, "LOADING MAP");
                     ot::map::Map bsp;
                     if (ot::map::loadMap(bsp,
                                          reinterpret_cast<const uint8_t*>(mapText.data()),
@@ -1172,7 +1199,9 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
 
         const glm::mat4 viewProj = player.camera().viewProj();
         if (mapApplied) {
+            renderer.bindTexture(level.mapTexture());
             renderer.draw(level.mapMesh(), viewProj);
+            renderer.bindTexture(0);
         } else {
             renderer.draw(level.floorMesh(), viewProj);
             renderer.draw(level.boxMesh(), viewProj);

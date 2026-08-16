@@ -29,12 +29,14 @@ public:
     const Mesh& floorMesh() const { return m_floorMesh; }
     const Mesh& boxMesh() const { return m_boxMesh; }
     const Mesh& mapMesh() const { return m_mapMesh; }
+    unsigned int mapTexture() const { return m_mapTexture; }
 
 private:
     std::unique_ptr<ICollisionWorld> m_world;
     Mesh m_floorMesh;
     Mesh m_boxMesh;
     Mesh m_mapMesh;
+    unsigned int m_mapTexture = 0;
 };
 
 } // namespace ot

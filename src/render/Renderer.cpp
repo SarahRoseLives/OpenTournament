@@ -14,10 +14,13 @@ namespace ot {
 static const char* kVertexShaderSrc = R"(#version 300 es
 precision highp float;
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aColor;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec3 aColor;
 uniform mat4 uMVP;
+out vec2 vUV;
 out vec3 vColor;
 void main() {
+    vUV = aUV;
     vColor = aColor;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
@@ -25,29 +28,36 @@ void main() {
 
 static const char* kFragmentShaderSrc = R"(#version 300 es
 precision mediump float;
+in vec2 vUV;
 in vec3 vColor;
 out vec4 FragColor;
+uniform sampler2D uTex;
 void main() {
-    FragColor = vec4(vColor, 1.0);
+    FragColor = texture(uTex, vUV) * vec4(vColor, 1.0);
 }
 )";
 #else
 static const char* kVertexShaderSrc = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aColor;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec3 aColor;
 uniform mat4 uMVP;
+out vec2 vUV;
 out vec3 vColor;
 void main() {
+    vUV = aUV;
     vColor = aColor;
     gl_Position = uMVP * vec4(aPos, 1.0);
 }
 )";
 
 static const char* kFragmentShaderSrc = R"(#version 330 core
+in vec2 vUV;
 in vec3 vColor;
 out vec4 FragColor;
+uniform sampler2D uTex;
 void main() {
-    FragColor = vec4(vColor, 1.0);
+    FragColor = texture(uTex, vUV) * vec4(vColor, 1.0);
 }
 )";
 #endif
@@ -120,6 +130,20 @@ bool Renderer::init(SDL_Window* window) {
 
     m_mvpLoc = glGetUniformLocation(m_program, "uMVP");
 
+    glUseProgram(m_program);
+    glUniform1i(glGetUniformLocation(m_program, "uTex"), 0);
+
+    // 1x1 white texture used as the fallback for untextured geometry.
+    glGenTextures(1, &m_whiteTex);
+    glBindTexture(GL_TEXTURE_2D, m_whiteTex);
+    const unsigned char white[4] = {255, 255, 255, 255};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    m_boundTex = m_whiteTex;
+
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
 
@@ -132,8 +156,14 @@ void Renderer::beginFrame() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
+void Renderer::bindTexture(unsigned int texture) {
+    m_boundTex = texture ? texture : m_whiteTex;
+}
+
 void Renderer::draw(const Mesh& mesh, const glm::mat4& mvp) {
     glUseProgram(m_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, m_boundTex);
     glUniformMatrix4fv(m_mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
     mesh.render();
 }
@@ -157,6 +187,10 @@ void Renderer::endFrame() {
 }
 
 void Renderer::shutdown() {
+    if (m_whiteTex) {
+        glDeleteTextures(1, &m_whiteTex);
+        m_whiteTex = 0;
+    }
     if (m_program) {
         glDeleteProgram(m_program);
         m_program = 0;

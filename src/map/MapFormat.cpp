@@ -114,10 +114,13 @@ bool saveMap(const Map& map, const std::string& path) {
         for (const auto& v : map.verts) {
             w.i32(v.pointIndex);
             w.i32(v.side);
+            w.f32(v.u);
+            w.f32(v.v);
         }
         w.u32(static_cast<uint32_t>(map.surfaces.size()));
         for (const auto& s : map.surfaces) {
             w.i32(s.materialIndex);
+            w.i32(s.textureIndex);
             w.u32(s.polyFlags);
             w.i32(s.pBase);
             w.f32(s.normalX); w.f32(s.normalY); w.f32(s.normalZ);
@@ -157,6 +160,22 @@ bool saveMap(const Map& map, const std::string& path) {
         materials = w.data();
     }
 
+    // Textures.
+    std::vector<uint8_t> textures;
+    {
+        Writer w;
+        w.u32(static_cast<uint32_t>(map.textures.size()));
+        for (const auto& t : map.textures) {
+            w.u32(static_cast<uint32_t>(t.name.size()));
+            w.bytes(t.name.data(), t.name.size());
+            w.i32(t.width);
+            w.i32(t.height);
+            w.u32(static_cast<uint32_t>(t.rgba.size()));
+            w.bytes(t.rgba.data(), t.rgba.size());
+        }
+        textures = w.data();
+    }
+
     // Assemble the file.
     std::vector<uint8_t> file;
     file.resize(kHeaderSize);
@@ -177,6 +196,7 @@ bool saveMap(const Map& map, const std::string& path) {
         {static_cast<uint32_t>(SectionId::Geometry), &geometry},
         {static_cast<uint32_t>(SectionId::PlayerStarts), &starts},
         {static_cast<uint32_t>(SectionId::Materials), &materials},
+        {static_cast<uint32_t>(SectionId::Textures), &textures},
     };
 
     // Section table size: 4 (count) + sections * 12.
@@ -299,11 +319,14 @@ bool loadMap(Map& map, const uint8_t* data, size_t bufSize) {
             for (auto& v : map.verts) {
                 v.pointIndex = s.i32();
                 v.side = s.i32();
+                v.u = s.f32();
+                v.v = s.f32();
             }
             const uint32_t surfCount = s.u32();
             map.surfaces.resize(surfCount);
             for (auto& sf : map.surfaces) {
                 sf.materialIndex = s.i32();
+                sf.textureIndex = s.i32();
                 sf.polyFlags = s.u32();
                 sf.pBase = s.i32();
                 sf.normalX = s.f32(); sf.normalY = s.f32(); sf.normalZ = s.f32();
@@ -331,6 +354,22 @@ bool loadMap(Map& map, const uint8_t* data, size_t bufSize) {
                 std::string str(len, '\0');
                 s.bytes(&str[0], len);
                 map.materials[k] = str;
+            }
+        } else if (id == static_cast<uint32_t>(SectionId::Textures)) {
+            const uint32_t count = s.u32();
+            map.textures.resize(count);
+            for (uint32_t k = 0; k < count; ++k) {
+                const uint32_t nameLen = s.u32();
+                std::string name(nameLen, '\0');
+                s.bytes(&name[0], nameLen);
+                map.textures[k].name = name;
+                map.textures[k].width = s.i32();
+                map.textures[k].height = s.i32();
+                const uint32_t rgbaLen = s.u32();
+                map.textures[k].rgba.resize(rgbaLen);
+                if (rgbaLen > 0) {
+                    s.bytes(map.textures[k].rgba.data(), rgbaLen);
+                }
             }
         }
     }

@@ -1,5 +1,7 @@
 #include "map/BspMap.h"
 
+#include <algorithm>
+
 #include "game/BrushCollisionWorld.h"
 
 namespace ot::map {
@@ -10,11 +12,14 @@ glm::vec3 pointAt(const Map& map, int32_t index) {
     return glm::vec3(map.points[index].x, map.points[index].y, map.points[index].z);
 }
 
-// Gathers a node's polygon points (via vertPool -> verts -> points). Returns
-// false if any index is out of range.
-bool gatherPoly(const Map& map, const BspNode& node, std::vector<glm::vec3>& out) {
+// Gathers a node's polygon points (via vertPool -> verts -> points) plus the
+// per-vertex texture coordinates. Returns false if any index is out of range.
+bool gatherPoly(const Map& map, const BspNode& node, std::vector<glm::vec3>& out,
+                std::vector<glm::vec2>& outUv) {
     out.clear();
+    outUv.clear();
     out.reserve(node.numVertices);
+    outUv.reserve(node.numVertices);
     for (int32_t k = 0; k < node.numVertices; ++k) {
         const int32_t vi = node.vertPool + k;
         if (vi < 0 || vi >= static_cast<int32_t>(map.verts.size())) {
@@ -25,6 +30,7 @@ bool gatherPoly(const Map& map, const BspNode& node, std::vector<glm::vec3>& out
             return false;
         }
         out.push_back(pointAt(map, pi));
+        outUv.push_back(glm::vec2(map.verts[vi].u, map.verts[vi].v));
     }
     return true;
 }
@@ -56,7 +62,8 @@ void triangulateBsp(const Map& map, TriangleMesh& out) {
             continue;
         }
         std::vector<glm::vec3> poly;
-        if (!gatherPoly(map, node, poly) || poly.size() < 3) {
+        std::vector<glm::vec2> polyUv;
+        if (!gatherPoly(map, node, poly, polyUv) || poly.size() < 3) {
             continue;
         }
 
@@ -71,13 +78,21 @@ void triangulateBsp(const Map& map, TriangleMesh& out) {
             (node.surf >= 0 && node.surf < static_cast<int32_t>(map.surfaces.size()))
                 ? map.surfaces[node.surf].materialIndex
                 : 0;
+        const int32_t tex =
+            (node.surf >= 0 && node.surf < static_cast<int32_t>(map.surfaces.size()))
+                ? map.surfaces[node.surf].textureIndex
+                : -1;
 
         for (size_t k = 1; k + 1 < poly.size(); ++k) {
             out.positions.push_back(poly[0]);
             out.positions.push_back(poly[k]);
             out.positions.push_back(poly[k + 1]);
+            out.uvs.push_back(polyUv[0]);
+            out.uvs.push_back(polyUv[k]);
+            out.uvs.push_back(polyUv[k + 1]);
             out.normals.push_back(n);
             out.materialIndex.push_back(mat);
+            out.textureIndex.push_back(tex);
         }
     }
 }
@@ -90,7 +105,8 @@ void buildBspCollision(const Map& map, BrushCollisionWorld& out) {
             continue;
         }
         std::vector<glm::vec3> poly;
-        if (!gatherPoly(map, node, poly) || poly.size() < 3) {
+        std::vector<glm::vec2> polyUv;
+        if (!gatherPoly(map, node, poly, polyUv) || poly.size() < 3) {
             continue;
         }
 
@@ -162,13 +178,13 @@ void buildBspCollision(const Map& map, BrushCollisionWorld& out) {
     }
 }
 
-std::vector<float> buildMesh(const Map& bsp) {
+std::vector<float> buildMesh(const Map& bsp, const TextureAtlas* atlas) {
     TriangleMesh mesh;
     triangulateBsp(bsp, mesh);
 
     const glm::vec3 lightDir = glm::normalize(glm::vec3(0.5f, 1.0f, 0.35f));
     std::vector<float> verts;
-    verts.reserve(mesh.positions.size() * 6);
+    verts.reserve(mesh.positions.size() * 8);
     for (size_t i = 0; i + 2 < mesh.positions.size(); i += 3) {
         const glm::vec3& p0 = mesh.positions[i];
         const glm::vec3& p1 = mesh.positions[i + 1];
@@ -193,16 +209,93 @@ std::vector<float> buildMesh(const Map& bsp) {
         const float b = (h & 0xff) / 255.0f;
         const glm::vec3 color = glm::vec3(0.25f + 0.75f * r, 0.25f + 0.75f * g, 0.25f + 0.75f * b) * shade;
 
-        for (const glm::vec3* p : {&p0, &p1, &p2}) {
-            verts.push_back(p->x);
-            verts.push_back(p->y);
-            verts.push_back(p->z);
+        // Per-texture atlas UV transform.
+        const int tex = mesh.textureIndex[i / 3];
+        float su = 1.0f, sv = 1.0f, ou = 0.0f, ov = 0.0f;
+        if (atlas && tex >= 0 && tex < static_cast<int>(atlas->uvScale.size())) {
+            su = atlas->uvScale[tex * 2 + 0];
+            sv = atlas->uvScale[tex * 2 + 1];
+            ou = atlas->uvOffset[tex * 2 + 0];
+            ov = atlas->uvOffset[tex * 2 + 1];
+        }
+
+        const glm::vec2 uv0 = mesh.uvs[i + 0];
+        const glm::vec2 uv1 = mesh.uvs[i + 1];
+        const glm::vec2 uv2 = mesh.uvs[i + 2];
+        const glm::vec2 auv0(ou + uv0.x * su, ov + uv0.y * sv);
+        const glm::vec2 auv1(ou + uv1.x * su, ov + uv1.y * sv);
+        const glm::vec2 auv2(ou + uv2.x * su, ov + uv2.y * sv);
+
+        const glm::vec3* ps[3] = {&p0, &p1, &p2};
+        const glm::vec2* uvs[3] = {&auv0, &auv1, &auv2};
+        for (int k = 0; k < 3; ++k) {
+            verts.push_back(ps[k]->x);
+            verts.push_back(ps[k]->y);
+            verts.push_back(ps[k]->z);
+            verts.push_back(uvs[k]->x);
+            verts.push_back(uvs[k]->y);
             verts.push_back(color.r);
             verts.push_back(color.g);
             verts.push_back(color.b);
         }
     }
     return verts;
+}
+
+void buildAtlas(const Map& map, TextureAtlas& out) {
+    out = TextureAtlas{};
+    if (map.textures.empty()) {
+        return;
+    }
+
+    // Determine a uniform slot size (power of two, capped at 1024).
+    int slot = 1;
+    for (const auto& t : map.textures) {
+        int m = std::max(t.width, t.height);
+        while (slot < m && slot < 1024) {
+            slot <<= 1;
+        }
+    }
+
+    const int n = static_cast<int>(map.textures.size());
+    int cols = 1;
+    while (cols * cols < n) {
+        ++cols;
+    }
+    int rows = (n + cols - 1) / cols;
+
+    out.slot = slot;
+    out.width = cols * slot;
+    out.height = rows * slot;
+    out.rgba.assign(static_cast<size_t>(out.width) * out.height * 4, 0);
+    out.uvScale.resize(n * 2);
+    out.uvOffset.resize(n * 2);
+
+    for (int ti = 0; ti < n; ++ti) {
+        const auto& tex = map.textures[ti];
+        const int col = ti % cols;
+        const int row = ti / cols;
+        const int ox = col * slot;
+        const int oy = row * slot;
+        for (int y = 0; y < slot; ++y) {
+            const int sy = tex.height > 0 ? (y * tex.height) / slot : 0;
+            for (int x = 0; x < slot; ++x) {
+                const int sx = tex.width > 0 ? (x * tex.width) / slot : 0;
+                const size_t srcIdx = (static_cast<size_t>(sy) * tex.width + sx) * 4;
+                const size_t dstIdx = (static_cast<size_t>(oy + y) * out.width + (ox + x)) * 4;
+                if (srcIdx + 3 < tex.rgba.size()) {
+                    out.rgba[dstIdx + 0] = tex.rgba[srcIdx + 0];
+                    out.rgba[dstIdx + 1] = tex.rgba[srcIdx + 1];
+                    out.rgba[dstIdx + 2] = tex.rgba[srcIdx + 2];
+                    out.rgba[dstIdx + 3] = tex.rgba[srcIdx + 3];
+                }
+            }
+        }
+        out.uvScale[ti * 2 + 0] = static_cast<float>(slot) / out.width;
+        out.uvScale[ti * 2 + 1] = static_cast<float>(slot) / out.height;
+        out.uvOffset[ti * 2 + 0] = static_cast<float>(ox) / out.width;
+        out.uvOffset[ti * 2 + 1] = static_cast<float>(oy) / out.height;
+    }
 }
 
 void computeBounds(const Map& map, glm::vec3& bmin, glm::vec3& bmax) {

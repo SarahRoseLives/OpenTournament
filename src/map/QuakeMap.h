@@ -51,6 +51,8 @@ bool parseQuakeMap(const std::string& text, QuakeMapData& out);
 struct TriangleMesh {
     std::vector<glm::vec3> positions;     // flat, 3 vertices per triangle
     std::vector<int32_t> materialIndex;   // per triangle
+    std::vector<int32_t> textureIndex;    // per triangle (-1 = none)
+    std::vector<glm::vec2> uvs;           // per vertex, 3 per triangle
     std::vector<glm::vec3> normals;       // per triangle (outward face normal)
 };
 

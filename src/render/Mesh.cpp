@@ -6,18 +6,21 @@ namespace ot {
 namespace {
 
 void configureAttributes() {
-    const GLsizei stride = 6 * sizeof(float);
+    const GLsizei stride = 8 * sizeof(float);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride,
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride,
                           reinterpret_cast<void*>(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride,
+                          reinterpret_cast<void*>(5 * sizeof(float)));
+    glEnableVertexAttribArray(2);
 }
 
 } // namespace
 
 void Mesh::upload(const std::vector<float>& vertices) {
-    m_vertexCount = static_cast<int>(vertices.size() / 6);
+    m_vertexCount = static_cast<int>(vertices.size() / 8);
 
     glGenVertexArrays(1, &m_vao);
     glBindVertexArray(m_vao);
@@ -34,7 +37,7 @@ void Mesh::upload(const std::vector<float>& vertices) {
 }
 
 void Mesh::uploadLines(const std::vector<float>& vertices) {
-    m_lineCount = static_cast<int>(vertices.size() / 6);
+    m_lineCount = static_cast<int>(vertices.size() / 8);
 
     glGenVertexArrays(1, &m_lineVao);
     glBindVertexArray(m_lineVao);

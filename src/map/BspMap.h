@@ -23,9 +23,22 @@ void triangulateBsp(const Map& map, TriangleMesh& out);
 // player AABB collisions against it.
 void buildBspCollision(const Map& map, BrushCollisionWorld& out);
 
-// Builds interleaved vertex data (position + color, 6 floats per vertex) for
-// rendering the BSP map.
-std::vector<float> buildMesh(const Map& bsp);
+// Packs the map's textures into a single RGBA atlas image (grid layout, each
+// texture resized to a uniform power-of-two slot).
+struct TextureAtlas {
+    std::vector<uint8_t> rgba;   // atlas pixels (RGBA8)
+    int width = 0;
+    int height = 0;
+    int slot = 0;                // per-texture slot size
+    std::vector<float> uvScale;  // per texture (sx, sy)
+    std::vector<float> uvOffset; // per texture (ox, oy)
+};
+void buildAtlas(const Map& map, TextureAtlas& out);
+
+// Builds interleaved vertex data (position + uv + color, 8 floats per vertex)
+// for rendering the BSP map. If `atlas` is non-null, texture coordinates are
+// remapped into the atlas space.
+std::vector<float> buildMesh(const Map& bsp, const TextureAtlas* atlas = nullptr);
 
 // Computes the axis-aligned bounds of the points actually referenced by the
 // BSP vertices (skips any unused points in the point pool).

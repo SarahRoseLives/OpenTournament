@@ -68,6 +68,8 @@ void pushVertex(std::vector<float>& verts, const glm::vec3& pos, const glm::vec3
     verts.push_back(pos.x);
     verts.push_back(pos.y);
     verts.push_back(pos.z);
+    verts.push_back(0.0f);
+    verts.push_back(0.0f);
     verts.push_back(color.r);
     verts.push_back(color.g);
     verts.push_back(color.b);

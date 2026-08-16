@@ -72,9 +72,10 @@ static bool parsePlayerStart(const Package& pkg, const uint8_t* base, size_t bas
     }
 
     bool haveLoc = false;
+    const int32_t noneIdx = findNameIndex(pkg, "None");
     while (p + 2 <= end) {
         const int32_t name = Package::readCompact(p, end);
-        if (name == 0) {
+        if (name == noneIdx) {
             break;
         }
         const uint8_t info = *p++;
@@ -133,6 +134,7 @@ static bool parsePlayerStart(const Package& pkg, const uint8_t* base, size_t bas
 
 struct SMTri {
     float v[9];     // 3 vertices (x,y,z)
+    float uv[6];    // 3 vertices (u,v) — first UV set
     int32_t mat;    // material index into the mesh's Materials array
 };
 
@@ -218,8 +220,6 @@ static bool parseStaticMesh(const Package& pkg, int exportIndex,
         std::fprintf(stderr, "  [smesh] property skip failed\n");
         return false;
     }
-    std::printf("  after props off=%lld (size=%d)\n",
-                (long long)(p - (base + e.serialOffset)), e.serialSize);
 
     // UPrimitive::Serialize serializes BoundingBox (FBox = Min+Max+IsValid = 25
     // bytes) + BoundingSphere (FSphere = FPlane = 16 bytes) natively, after the
@@ -276,10 +276,6 @@ static bool parseStaticMesh(const Package& pkg, int exportIndex,
     const int32_t kdopTriCount = Package::readCompact(p, end);
     p += static_cast<size_t>(kdopTriCount) * 8;  // FkDOPCollisionTriangle
 
-    std::printf("  verts=%d colors=%d alpha=%d uv=%d idx=%d sections=%d kdopNodes=%d\n",
-                vertCount, colorCount, alphaCount, uvStreamCount, idxCount,
-                sectionCount, nodeCount);
-
     // 12. RawTriangles (TLazyArray<FStaticMeshTriangle>): endOffset + count + tris.
     p += 4;  // end offset
     const int32_t triCount = Package::readCompact(p, end);
@@ -298,7 +294,18 @@ static bool parseStaticMesh(const Package& pkg, int exportIndex,
         }
         const int32_t numUVs = rdi32(p);
         p += 4;
-        p += static_cast<size_t>(numUVs) * 24;  // UVs[3][numUVs]
+        for (int k = 0; k < 6; ++k) {
+            t.uv[k] = 0.0f;
+        }
+        if (numUVs >= 1) {
+            for (int k = 0; k < 6; ++k) {
+                t.uv[k] = rdFloat(p);
+                p += 4;
+            }
+            p += static_cast<size_t>(numUVs - 1) * 24;  // remaining UV sets
+        } else {
+            p += static_cast<size_t>(numUVs) * 24;
+        }
         p += 12;                                // Colors[3]
         t.mat = rdi32(p);
         p += 4;
@@ -306,6 +313,83 @@ static bool parseStaticMesh(const Package& pkg, int exportIndex,
         outTris.push_back(t);
     }
     return true;
+}
+
+// Parse a static mesh's Materials array, returning the UMaterial references in
+// order (one per material index).
+static bool parseStaticMeshMaterials(const Package& pkg, int exportIndex,
+                                     std::vector<int32_t>& outMaterials) {
+    const auto& e = pkg.exp(exportIndex);
+    if (e.serialSize <= 0) {
+        return false;
+    }
+    const uint8_t* p = pkg.data() + e.serialOffset;
+    const uint8_t* end = p + e.serialSize;
+    const uint8_t* hardEnd = pkg.data() + pkg.size();
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+    const int32_t nameMaterials = findNameIndex(pkg, "Materials");
+    while (p + 2 <= end) {
+        const int32_t name = Package::readCompact(p, end);
+        if (name == 0) {
+            break;
+        }
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        if (typ == 10) {
+            Package::readCompact(p, end);
+        }
+        const uint8_t sc = info & 0x70;
+        int32_t size;
+        if (sc == 0x00) {
+            size = 1;
+        } else if (sc == 0x10) {
+            size = 2;
+        } else if (sc == 0x20) {
+            size = 4;
+        } else if (sc == 0x30) {
+            size = 12;
+        } else if (sc == 0x40) {
+            size = 16;
+        } else if (sc == 0x50) {
+            if (p >= end) return false;
+            size = *p++;
+        } else if (sc == 0x60) {
+            if (p + 2 > end) return false;
+            size = rdu16(p);
+            p += 2;
+        } else {
+            if (p + 4 > end) return false;
+            size = rdi32(p);
+            p += 4;
+        }
+        if ((info & 0x80) && typ != 3) {
+            const uint8_t b = *p++;
+            if (b & 0x80) {
+                p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+        }
+        if (name == nameMaterials && typ == 9) {
+            const int32_t count = Package::readCompact(p, end);
+            if (count < 0 || count > 1024) {
+                return false;
+            }
+            for (int32_t k = 0; k < count; ++k) {
+                if (p >= end) return false;
+                outMaterials.push_back(Package::readCompact(p, end));  // Material
+                p += 2;  // EnableCollision + OldEnableCollision
+            }
+            return true;
+        }
+        if (typ == 3) {
+        } else if (typ == 5 || typ == 6 || typ == 8) {
+            Package::readCompact(p, end);
+        } else {
+            p += size;
+        }
+    }
+    return false;
 }
 
 // ---- Static mesh placement + resolution ----
@@ -372,6 +456,160 @@ static bool resolveStaticMesh(const Package& mainPkg, int32_t mesh,
     return false;
 }
 
+// Resolve any FPackageIndex to (Package, export index), loading external
+// packages (StaticMeshes/*.usx or Textures/*.utx) as needed.
+static bool resolveObject(const Package& mainPkg, int32_t index,
+                          const Package*& outPkg, int* outExport,
+                          std::vector<std::unique_ptr<Package>>& cache) {
+    if (index > 0) {
+        const int32_t idx = index - 1;
+        if (idx < mainPkg.exportCount()) {
+            outPkg = &mainPkg;
+            *outExport = idx;
+            return true;
+        }
+        return false;
+    }
+    if (index == 0) {
+        return false;
+    }
+    const int32_t imp = -index - 1;
+    if (imp < 0 || imp >= mainPkg.importCount()) {
+        return false;
+    }
+    const auto& im = mainPkg.imp(imp);
+    const std::string pkgName = mainPkg.resolveIndex(im.package);
+    if (pkgName.empty() || pkgName == "None") {
+        return false;
+    }
+    const std::string objName = mainPkg.resolveIndex(im.objectName);
+
+    for (auto& cached : cache) {
+        for (int i = 0; i < cached->exportCount(); ++i) {
+            if (cached->exportName(i) == objName) {
+                outPkg = cached.get();
+                *outExport = i;
+                return true;
+            }
+        }
+    }
+    auto p = std::make_unique<Package>();
+    const std::string smPath = "C:\\UT2004\\StaticMeshes\\" + pkgName + ".usx";
+    const std::string txPath = "C:\\UT2004\\Textures\\" + pkgName + ".utx";
+    if (!p->open(smPath) && !p->open(txPath)) {
+        return false;
+    }
+    for (int i = 0; i < p->exportCount(); ++i) {
+        if (p->exportName(i) == objName) {
+            outPkg = p.get();
+            *outExport = i;
+            cache.push_back(std::move(p));
+            return true;
+        }
+    }
+    return false;
+}
+
+// Find an ObjectProperty value in an export's tagged property stream.
+static int32_t findObjectProperty(const Package& pkg, int exportIdx, const char* propName) {
+    const auto& e = pkg.exp(exportIdx);
+    if (e.serialSize <= 0) {
+        return 0;
+    }
+    const uint8_t* p = pkg.data() + e.serialOffset;
+    const uint8_t* end = p + e.serialSize;
+    const uint8_t* hardEnd = pkg.data() + pkg.size();
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+    const int32_t target = findNameIndex(pkg, propName);
+    const int32_t noneIdx = findNameIndex(pkg, "None");
+    while (p + 2 <= end) {
+        const int32_t name = Package::readCompact(p, end);
+        if (name == 0 || name == noneIdx) {
+            break;
+        }
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        if (typ == 10) {
+            Package::readCompact(p, end);  // struct name
+        }
+        const uint8_t sc = info & 0x70;
+        int32_t size;
+        if (sc == 0x00) {
+            size = 1;
+        } else if (sc == 0x10) {
+            size = 2;
+        } else if (sc == 0x20) {
+            size = 4;
+        } else if (sc == 0x30) {
+            size = 12;
+        } else if (sc == 0x40) {
+            size = 16;
+        } else if (sc == 0x50) {
+            if (p >= end) return 0;
+            size = *p++;
+        } else if (sc == 0x60) {
+            if (p + 2 > end) return 0;
+            size = rdu16(p);
+            p += 2;
+        } else {
+            if (p + 4 > end) return 0;
+            size = rdi32(p);
+            p += 4;
+        }
+        if (size < 0 || size > 10000000) {
+            return 0;
+        }
+        if ((info & 0x80) && typ != 3) {
+            const uint8_t b = *p++;
+            if (b & 0x80) {
+                p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+        }
+        if (name == target && typ == 5) {
+            return Package::readCompact(p, end);
+        }
+        if (typ == 3) {
+            // bool
+        } else if (typ == 5 || typ == 6 || typ == 8) {
+            Package::readCompact(p, end);
+        } else {
+            p += size;
+        }
+    }
+    return 0;
+}
+
+// Resolve a material FPackageIndex to its diffuse texture.
+static bool resolveMaterialTexture(const Package& mainPkg, int32_t material,
+                                   const Package*& outPkg, int* outExport, int depth,
+                                   std::vector<std::unique_ptr<Package>>& cache) {
+    if (depth > 8 || material == 0) {
+        return false;
+    }
+    const Package* pkg = nullptr;
+    int idx = -1;
+    if (!resolveObject(mainPkg, material, pkg, &idx, cache)) {
+        return false;
+    }
+    const std::string cls = pkg->exportClass(idx);
+    if (cls == "Texture") {
+        outPkg = pkg;
+        *outExport = idx;
+        return true;
+    }
+    if (cls == "Shader" || cls == "Combiner" || cls == "FinalBlend") {
+        const char* prop = (cls == "Combiner") ? "Material1" : "Diffuse";
+        if (cls == "FinalBlend") {
+            prop = "Material";
+        }
+        const int32_t tex = findObjectProperty(*pkg, idx, prop);
+        return resolveMaterialTexture(*pkg, tex, outPkg, outExport, depth + 1, cache);
+    }
+    return false;
+}
+
 // UE2 FRotator -> 3x3 rotation matrix (columns = X, Y, Z axes). UE2 Z-up.
 static void rotatorMatrix(int32_t pitch, int32_t yaw, int32_t roll, float m[9]) {
     const float k = 6.28318531f / 65536.0f;
@@ -391,6 +629,301 @@ static void rotatorMatrix(int32_t pitch, int32_t yaw, int32_t roll, float m[9]) 
     m[6] = cy * sr - sy * sp * cr;
     m[7] = sy * sr + cy * sp * cr;
     m[8] = cp * cr;
+}
+
+// ---- Texture (UTexture) parsing + DXT decoding ----
+
+static void decodeDxt1Block(const uint8_t* b, uint8_t* out) {
+    const uint16_t c0 = rdu16(b);
+    const uint16_t c1 = rdu16(b + 2);
+    uint8_t col[4][4];
+    col[0][0] = static_cast<uint8_t>(((c0 >> 11) & 0x1f) * 255 / 31);
+    col[0][1] = static_cast<uint8_t>(((c0 >> 5) & 0x3f) * 255 / 63);
+    col[0][2] = static_cast<uint8_t>((c0 & 0x1f) * 255 / 31);
+    col[0][3] = 255;
+    col[1][0] = static_cast<uint8_t>(((c1 >> 11) & 0x1f) * 255 / 31);
+    col[1][1] = static_cast<uint8_t>(((c1 >> 5) & 0x3f) * 255 / 63);
+    col[1][2] = static_cast<uint8_t>((c1 & 0x1f) * 255 / 31);
+    col[1][3] = 255;
+    if (c0 > c1) {
+        for (int k = 0; k < 3; ++k) {
+            col[2][k] = static_cast<uint8_t>((2 * col[0][k] + col[1][k]) / 3);
+            col[3][k] = static_cast<uint8_t>((col[0][k] + 2 * col[1][k]) / 3);
+        }
+        col[2][3] = col[3][3] = 255;
+    } else {
+        for (int k = 0; k < 3; ++k) {
+            col[2][k] = static_cast<uint8_t>((col[0][k] + col[1][k]) / 2);
+            col[3][k] = 0;
+        }
+        col[2][3] = 255;
+        col[3][3] = 0;
+    }
+    const uint32_t idx = rdu32(b + 4);
+    for (int i = 0; i < 16; ++i) {
+        const int c = (idx >> (2 * i)) & 3;
+        out[i * 4 + 0] = col[c][0];
+        out[i * 4 + 1] = col[c][1];
+        out[i * 4 + 2] = col[c][2];
+        out[i * 4 + 3] = col[c][3];
+    }
+}
+
+static void decodeDxt3Block(const uint8_t* b, uint8_t* out) {
+    uint8_t color[64];
+    decodeDxt1Block(b + 8, color);
+    for (int i = 0; i < 16; ++i) {
+        const uint8_t a = (i & 1) ? (b[i / 2] >> 4) : (b[i / 2] & 0x0f);
+        out[i * 4 + 0] = color[i * 4 + 0];
+        out[i * 4 + 1] = color[i * 4 + 1];
+        out[i * 4 + 2] = color[i * 4 + 2];
+        out[i * 4 + 3] = static_cast<uint8_t>(a * 255 / 15);
+    }
+}
+
+static void decodeDxt5Block(const uint8_t* b, uint8_t* out) {
+    uint8_t color[64];
+    decodeDxt1Block(b + 8, color);
+    const uint8_t a0 = b[0];
+    const uint8_t a1 = b[1];
+    uint8_t alpha[8];
+    alpha[0] = a0;
+    alpha[1] = a1;
+    if (a0 > a1) {
+        for (int i = 1; i <= 6; ++i) {
+            alpha[i + 1] = static_cast<uint8_t>(((8 - i) * a0 + i * a1) / 8);
+        }
+    } else {
+        for (int i = 1; i <= 4; ++i) {
+            alpha[i + 1] = static_cast<uint8_t>(((5 - i) * a0 + i * a1) / 5);
+        }
+        alpha[6] = 0;
+        alpha[7] = 255;
+    }
+    uint64_t idx = 0;
+    for (int k = 0; k < 6; ++k) {
+        idx |= static_cast<uint64_t>(b[2 + k]) << (8 * k);
+    }
+    for (int i = 0; i < 16; ++i) {
+        const int a = (idx >> (3 * i)) & 7;
+        out[i * 4 + 0] = color[i * 4 + 0];
+        out[i * 4 + 1] = color[i * 4 + 1];
+        out[i * 4 + 2] = color[i * 4 + 2];
+        out[i * 4 + 3] = alpha[a];
+    }
+}
+
+// Decode mip-0 data (src) to RGBA given width/height and UT2004 TEXF_* format.
+static bool decodeTexture(int format, const uint8_t* src, size_t srcSize,
+                          std::vector<uint8_t>& rgba, int w, int h) {
+    rgba.assign(static_cast<size_t>(w) * h * 4, 0);
+    if (format == 5) {  // TEXF_RGBA8: stored as B,G,R,A.
+        if (srcSize < static_cast<size_t>(w) * h * 4) return false;
+        for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+            rgba[i * 4 + 0] = src[i * 4 + 2];
+            rgba[i * 4 + 1] = src[i * 4 + 1];
+            rgba[i * 4 + 2] = src[i * 4 + 0];
+            rgba[i * 4 + 3] = src[i * 4 + 3];
+        }
+        return true;
+    }
+    if (format == 3 || format == 7 || format == 8) {  // DXT1 / DXT3 / DXT5
+        const int bw = (w + 3) / 4;
+        const int bh = (h + 3) / 4;
+        const int blockSize = (format == 3) ? 8 : 16;
+        if (srcSize < static_cast<size_t>(bw) * bh * blockSize) return false;
+        uint8_t block[64];
+        for (int by = 0; by < bh; ++by) {
+            for (int bx = 0; bx < bw; ++bx) {
+                const uint8_t* b = src + (by * bw + bx) * blockSize;
+                if (format == 3) {
+                    decodeDxt1Block(b, block);
+                } else if (format == 7) {
+                    decodeDxt3Block(b, block);
+                } else {
+                    decodeDxt5Block(b, block);
+                }
+                for (int py = 0; py < 4; ++py) {
+                    for (int px = 0; px < 4; ++px) {
+                        const int x = bx * 4 + px;
+                        const int y = by * 4 + py;
+                        if (x >= w || y >= h) continue;
+                        const uint8_t* sp = block + (py * 4 + px) * 4;
+                        uint8_t* dp = rgba.data() + (y * w + x) * 4;
+                        dp[0] = sp[0];
+                        dp[1] = sp[1];
+                        dp[2] = sp[2];
+                        dp[3] = sp[3];
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    return false;  // P8 and other paletted/rare formats unsupported for now.
+}
+
+// Parse one UTexture export into RGBA (mip 0). Returns format via outFormat.
+static bool parseTexture(const Package& pkg, int exportIndex,
+                         std::vector<uint8_t>& outRgba, int& outW, int& outH,
+                         int& outFormat) {
+    const auto& e = pkg.exp(exportIndex);
+    if (e.serialSize <= 0) {
+        return false;
+    }
+    const uint8_t* base = pkg.data();
+    const uint8_t* p = base + e.serialOffset;
+    const uint8_t* end = p + e.serialSize;
+    const uint8_t* hardEnd = base + pkg.size();
+    if (end > hardEnd) {
+        end = hardEnd;
+    }
+
+    int format = -1;
+    int uBits = -1;
+    int vBits = -1;
+
+    // UTexture serializes a tagged-property stream (Detail, DetailScale,
+    // MipZero, Format, UBits, VBits, ...) terminated by "None". The exact
+    // structure varies across UT2004 package versions, so scan the serial data
+    // for the "Format" property and parse UBits/VBits right after it.
+    {
+        const int32_t nameFormat = findNameIndex(pkg, "Format");
+        const int32_t nameUBits = findNameIndex(pkg, "UBits");
+        const int32_t nameVBits = findNameIndex(pkg, "VBits");
+        const int32_t noneIdx = findNameIndex(pkg, "None");
+        bool found = false;
+
+        const uint8_t* scan = base + e.serialOffset;
+        for (; scan + 4 <= end; ++scan) {
+            const uint8_t* q = scan;
+            if (Package::readCompact(q, end) != nameFormat) {
+                continue;
+            }
+            if (q + 2 > end) {
+                continue;
+            }
+            const uint8_t info = *q++;
+            if ((info & 0x0F) != 1) {
+                continue;  // expect ByteProperty
+            }
+            const int fmt = *q++;
+            if (fmt < 0 || fmt > 11) {
+                continue;
+            }
+
+            const uint8_t* r = q;
+            int ub = -1, vb = -1;
+            for (int k = 0; k < 16 && r + 2 <= end; ++k) {
+                const int32_t n2 = Package::readCompact(r, end);
+                if (n2 == 0 || n2 == noneIdx) {
+                    break;
+                }
+                const uint8_t i2 = *r++;
+                const uint8_t t2 = i2 & 0x0F;
+                if (t2 == 10) {
+                    Package::readCompact(r, end);
+                }
+                const uint8_t sc2 = i2 & 0x70;
+                int32_t sz;
+                if (sc2 == 0x00) {
+                    sz = 1;
+                } else if (sc2 == 0x10) {
+                    sz = 2;
+                } else if (sc2 == 0x20) {
+                    sz = 4;
+                } else if (sc2 == 0x30) {
+                    sz = 12;
+                } else if (sc2 == 0x40) {
+                    sz = 16;
+                } else if (sc2 == 0x50) {
+                    if (r >= end) break;
+                    sz = *r++;
+                } else if (sc2 == 0x60) {
+                    if (r + 2 > end) break;
+                    sz = rdu16(r);
+                    r += 2;
+                } else {
+                    if (r + 4 > end) break;
+                    sz = rdi32(r);
+                    r += 4;
+                }
+                if (sz < 0 || sz > 10000000) {
+                    break;
+                }
+                if ((i2 & 0x80) && t2 != 3) {
+                    const uint8_t b = *r++;
+                    if (b & 0x80) {
+                        r += ((b & 0xC0) == 0x80) ? 1 : 3;
+                    }
+                }
+                const std::string pn = pkg.name(n2);
+                if (pn == "UBits" && t2 == 1 && r < end) {
+                    ub = *r++;
+                } else if (pn == "VBits" && t2 == 1 && r < end) {
+                    vb = *r++;
+                } else if (t2 == 3) {
+                } else if (t2 == 5 || t2 == 6 || t2 == 8) {
+                    Package::readCompact(r, end);
+                } else {
+                    r += sz;
+                }
+            }
+            if (ub >= 0 && vb >= 0 && ub <= 14 && vb <= 14) {
+                format = fmt;
+                uBits = ub;
+                vBits = vb;
+                p = r;  // resume at the mip section
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    if (uBits > 14 || vBits > 14) {
+        return false;  // sanity: reject implausibly large textures
+    }
+    const int w = 1 << uBits;
+    const int h = 1 << vBits;
+
+    // Mips: count + per mip (DataArray lazy + USize/VSize/UBits/VBits).
+    const int32_t mipCount = Package::readCompact(p, end);
+    if (mipCount <= 0 || p + 8 > end) {
+        return false;
+    }
+    p += 4;  // DataArray lazy end offset.
+    const int32_t dataCount = Package::readCompact(p, end);
+    if (dataCount < 0 || p + dataCount > end) {
+        return false;
+    }
+    const uint8_t* dataPtr = p;
+    p += dataCount;
+    p += 4 + 4 + 1 + 1;  // USize, VSize, UBits, VBits of mip 0.
+
+    outW = w;
+    outH = h;
+    outFormat = format;
+    return decodeTexture(format, dataPtr, dataCount, outRgba, w, h);
+}
+
+static bool writePpm(const std::string& path, const std::vector<uint8_t>& rgba,
+                     int w, int h) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        return false;
+    }
+    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+    std::vector<uint8_t> rgb(static_cast<size_t>(w) * h * 3);
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+        rgb[i * 3 + 0] = rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    std::fwrite(rgb.data(), 1, rgb.size(), f);
+    std::fclose(f);
+    return true;
 }
 
 static void usage() {
@@ -529,6 +1062,7 @@ int main(int argc, char** argv) {
         const int32_t nameSM = findNameIndex(pkg, "StaticMesh");
         const int32_t nameVec = findNameIndex(pkg, "Vector");
         const int32_t nameScale = findNameIndex(pkg, "DrawScale3D");
+        const int32_t noneIdx = findNameIndex(pkg, "None");
         std::printf("names: loc=%d sm=%d vec=%d scale3d=%d\n",
                     nameLoc, nameSM, nameVec, nameScale);
 
@@ -564,7 +1098,7 @@ int main(int argc, char** argv) {
             int32_t mesh = 0;
             while (p + 2 <= end) {
                 const int32_t name = Package::readCompact(p, end);
-                if (name == 0) {
+                if (name == noneIdx) {
                     break;
                 }
                 const uint8_t info = *p++;
@@ -664,6 +1198,29 @@ int main(int argc, char** argv) {
                         tris[i].v[3], tris[i].v[4], tris[i].v[5],
                         tris[i].v[6], tris[i].v[7], tris[i].v[8], tris[i].mat);
         }
+        return 0;
+    }
+
+    if (cmd == "textures") {
+        std::string outDir = argc > 3 ? argv[3] : "texout";
+        int found = 0;
+        for (int i = 0; i < pkg.exportCount(); ++i) {
+            if (pkg.exportClass(i) != "Texture") {
+                continue;
+            }
+            std::vector<uint8_t> rgba;
+            int w = 0, h = 0, fmt = -1;
+            if (!parseTexture(pkg, i, rgba, w, h, fmt)) {
+                continue;
+            }
+            const std::string path = outDir + "\\" + pkg.exportName(i) + ".ppm";
+            if (writePpm(path, rgba, w, h)) {
+                ++found;
+                std::printf("[%d] %s %dx%d fmt=%d\n", i, pkg.exportName(i).c_str(),
+                            w, h, fmt);
+            }
+        }
+        std::printf("wrote %d textures to %s\n", found, outDir.c_str());
         return 0;
     }
 
@@ -955,6 +1512,26 @@ int main(int argc, char** argv) {
                 mapName = mapName.substr(0, dot);
             }
             std::strncpy(map.name, mapName.c_str(), sizeof(map.name) - 1);
+
+            // Texture collection: dedupe resolved textures and keep the owning
+            // packages alive for parsing.
+            struct TexEntry { const Package* pkg; int exportIdx; };
+            std::vector<std::string> textureNames;
+            std::vector<TexEntry> textureEntries;
+            std::vector<std::unique_ptr<Package>> cache;
+
+            auto addTexture = [&](const Package* tpkg, int tidx) -> int32_t {
+                const std::string tname = tpkg->exportName(tidx);
+                for (size_t k = 0; k < textureNames.size(); ++k) {
+                    if (textureNames[k] == tname) {
+                        return static_cast<int32_t>(k);
+                    }
+                }
+                textureNames.push_back(tname);
+                textureEntries.push_back({tpkg, tidx});
+                return static_cast<int32_t>(textureNames.size()) - 1;
+            };
+
             // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
             map.points.reserve(points.size());
             for (const auto& v : points) {
@@ -978,6 +1555,11 @@ int main(int argc, char** argv) {
                 const Surf& s = surfs[i];
                 ot::map::BspSurface bs;
                 bs.materialIndex = surfMat[i]; bs.polyFlags = s.flags; bs.pBase = s.pBase;
+                const Package* tpkg = nullptr;
+                int tidx = -1;
+                if (resolveMaterialTexture(pkg, s.material, tpkg, &tidx, 0, cache)) {
+                    bs.textureIndex = addTexture(tpkg, tidx);
+                }
                 if (s.vNormal >= 0 && s.vNormal < vectorCount) {
                     bs.normalX = vectors[s.vNormal].x; bs.normalY = vectors[s.vNormal].z; bs.normalZ = vectors[s.vNormal].y;
                 }
@@ -992,12 +1574,48 @@ int main(int argc, char** argv) {
                 map.surfaces.push_back(bs);
             }
 
+            // BSP vertex UVs: computed from each node's surface texture basis.
+            for (const auto& n : nodes) {
+                if (n.surf < 0 || n.surf >= surfCount) {
+                    continue;
+                }
+                const Surf& s = surfs[n.surf];
+                if (s.vTextureU < 0 || s.vTextureU >= vectorCount ||
+                    s.vTextureV < 0 || s.vTextureV >= vectorCount ||
+                    s.pBase < 0 || s.pBase >= vertCount) {
+                    continue;
+                }
+                const int32_t basePi = verts[s.pBase].pi;
+                if (basePi < 0 || basePi >= pointCount) {
+                    continue;
+                }
+                const ot::map::Vec3& base = points[basePi];
+                const ot::map::Vec3& tu = vectors[s.vTextureU];
+                const ot::map::Vec3& tv = vectors[s.vTextureV];
+                for (uint8_t k = 0; k < n.numVertices; ++k) {
+                    const int32_t vi = n.vertPool + k;
+                    if (vi < 0 || vi >= vertCount) {
+                        continue;
+                    }
+                    const int32_t pi = verts[vi].pi;
+                    if (pi < 0 || pi >= pointCount) {
+                        continue;
+                    }
+                    const ot::map::Vec3& pv = points[pi];
+                    const float dx = pv.x - base.x;
+                    const float dy = pv.y - base.y;
+                    const float dz = pv.z - base.z;
+                    map.verts[vi].u = dx * tu.x + dy * tu.y + dz * tu.z;
+                    map.verts[vi].v = dx * tv.x + dy * tv.y + dz * tv.z;
+                }
+            }
+
             // ---- Static meshes: append each placed mesh's triangles as BSP
             // nodes (3-vertex polygons) so they render and collide identically
             // to the BSP geometry.
             const int32_t nameSM = findNameIndex(pkg, "StaticMesh");
             const int32_t nameScale3d = findNameIndex(pkg, "DrawScale3D");
-            std::vector<std::unique_ptr<Package>> smPackages;
+            const int32_t smNoneIdx = findNameIndex(pkg, "None");
             size_t smTriangles = 0;
             size_t smActors = 0;
             size_t smFailed = 0;
@@ -1030,7 +1648,7 @@ int main(int argc, char** argv) {
                     pl.mesh = 0;
                     while (ap + 2 <= aend) {
                         const int32_t name = Package::readCompact(ap, aend);
-                        if (name == 0) {
+                        if (name == smNoneIdx) {
                             break;
                         }
                         const uint8_t info = *ap++;
@@ -1098,7 +1716,7 @@ int main(int argc, char** argv) {
                     }
                     const Package* smPkg = nullptr;
                     int smExport = -1;
-                    if (!resolveStaticMesh(pkg, pl.mesh, smPkg, &smExport, smPackages)) {
+                    if (!resolveStaticMesh(pkg, pl.mesh, smPkg, &smExport, cache)) {
                         ++smFailed;
                         continue;
                     }
@@ -1108,6 +1726,10 @@ int main(int argc, char** argv) {
                         continue;
                     }
 
+                    // Resolve this mesh's materials to textures (one surface per
+                    // material index).
+                    std::vector<int32_t> matRefs;
+                    parseStaticMeshMaterials(*smPkg, smExport, matRefs);
                     const std::string matName = smPkg->exportName(smExport);
                     int32_t matIdx = -1;
                     for (size_t k = 0; k < materials.size(); ++k) {
@@ -1120,17 +1742,30 @@ int main(int argc, char** argv) {
                         matIdx = static_cast<int32_t>(materials.size());
                         materials.push_back(matName);
                     }
-
-                    ot::map::BspSurface bs;
-                    bs.materialIndex = matIdx;
-                    bs.polyFlags = 0;
-                    map.surfaces.push_back(bs);
-                    const int32_t surfIdx = static_cast<int32_t>(map.surfaces.size()) - 1;
+                    std::vector<int32_t> matSurf(matRefs.size(), -1);
+                    for (size_t mi = 0; mi < matRefs.size(); ++mi) {
+                        ot::map::BspSurface bs;
+                        bs.materialIndex = matIdx;
+                        bs.polyFlags = 0;
+                        const Package* tpkg = nullptr;
+                        int tidx = -1;
+                        if (resolveMaterialTexture(*smPkg, matRefs[mi], tpkg, &tidx, 0, cache)) {
+                            bs.textureIndex = addTexture(tpkg, tidx);
+                        }
+                        map.surfaces.push_back(bs);
+                        matSurf[mi] = static_cast<int32_t>(map.surfaces.size()) - 1;
+                    }
 
                     float rm[9];
                     rotatorMatrix(pl.pitch, pl.yaw, pl.roll, rm);
 
                     for (const auto& t : tris) {
+                        int32_t surfIdx = -1;
+                        if (t.mat >= 0 && t.mat < static_cast<int32_t>(matSurf.size())) {
+                            surfIdx = matSurf[t.mat];
+                        } else if (!matSurf.empty()) {
+                            surfIdx = matSurf[0];
+                        }
                         for (int v = 0; v < 3; ++v) {
                             const float lx = t.v[v * 3 + 0] * pl.scale[0];
                             const float ly = t.v[v * 3 + 1] * pl.scale[1];
@@ -1143,6 +1778,8 @@ int main(int argc, char** argv) {
                             ot::map::BspVert bv;
                             bv.pointIndex = static_cast<int32_t>(map.points.size()) - 1;
                             bv.side = 0;
+                            bv.u = t.uv[v * 2 + 0];
+                            bv.v = t.uv[v * 2 + 1];
                             map.verts.push_back(bv);
                         }
                         ot::map::BspNode bn;
@@ -1159,6 +1796,50 @@ int main(int argc, char** argv) {
             }
             std::printf("static meshes: actors=%zu triangles=%zu failed=%zu\n",
                         smActors, smTriangles, smFailed);
+
+            // Extract and pack the resolved textures (RGBA8 mip 0).
+            size_t texDecoded = 0;
+            map.textures.reserve(textureEntries.size());
+            for (size_t ti = 0; ti < textureEntries.size(); ++ti) {
+                ot::map::TextureData td;
+                td.name = textureNames[ti];
+                std::vector<uint8_t> rgba;
+                int w = 0, h = 0, fmt = -1;
+                if (parseTexture(*textureEntries[ti].pkg, textureEntries[ti].exportIdx,
+                                 rgba, w, h, fmt)) {
+                    td.width = w;
+                    td.height = h;
+                    td.rgba = std::move(rgba);
+                    ++texDecoded;
+                }
+                map.textures.push_back(std::move(td));
+            }
+            std::printf("textures=%zu decoded=%zu\n", map.textures.size(), texDecoded);
+
+            // Normalize the BSP vertex UVs from texels to [0,1] using each
+            // surface's resolved texture dimensions. Static-mesh UVs are already
+            // normalized.
+            for (const auto& n : nodes) {
+                if (n.surf < 0 || n.surf >= surfCount) {
+                    continue;
+                }
+                const int32_t texIdx = map.surfaces[n.surf].textureIndex;
+                if (texIdx < 0 || texIdx >= static_cast<int32_t>(map.textures.size())) {
+                    continue;
+                }
+                const auto& tex = map.textures[texIdx];
+                if (tex.width <= 0 || tex.height <= 0) {
+                    continue;
+                }
+                for (uint8_t k = 0; k < n.numVertices; ++k) {
+                    const int32_t vi = n.vertPool + k;
+                    if (vi < 0 || vi >= vertCount) {
+                        continue;
+                    }
+                    map.verts[vi].u /= static_cast<float>(tex.width);
+                    map.verts[vi].v /= static_cast<float>(tex.height);
+                }
+            }
 
             map.materials = materials;
 

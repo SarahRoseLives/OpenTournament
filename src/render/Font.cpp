@@ -68,16 +68,16 @@ const Glyph& glyphFor(char c) {
 
 void pushQuad(std::vector<float>& out, float x0, float y0, float x1, float y1,
               const glm::vec3& c) {
-    const float verts[6][6] = {
-        {x0, y0, 0, c.r, c.g, c.b},
-        {x1, y0, 0, c.r, c.g, c.b},
-        {x1, y1, 0, c.r, c.g, c.b},
-        {x0, y0, 0, c.r, c.g, c.b},
-        {x1, y1, 0, c.r, c.g, c.b},
-        {x0, y1, 0, c.r, c.g, c.b},
+    const float verts[6][8] = {
+        {x0, y0, 0, 0, 0, c.r, c.g, c.b},
+        {x1, y0, 0, 0, 0, c.r, c.g, c.b},
+        {x1, y1, 0, 0, 0, c.r, c.g, c.b},
+        {x0, y0, 0, 0, 0, c.r, c.g, c.b},
+        {x1, y1, 0, 0, 0, c.r, c.g, c.b},
+        {x0, y1, 0, 0, 0, c.r, c.g, c.b},
     };
     for (int i = 0; i < 6; ++i) {
-        out.insert(out.end(), verts[i], verts[i] + 6);
+        out.insert(out.end(), verts[i], verts[i] + 8);
     }
 }
 
