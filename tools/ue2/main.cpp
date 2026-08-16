@@ -332,6 +332,7 @@ static bool parseStaticMeshMaterials(const Package& pkg, int exportIndex,
         end = hardEnd;
     }
     const int32_t nameMaterials = findNameIndex(pkg, "Materials");
+    const int32_t nameMaterial = findNameIndex(pkg, "Material");
     while (p + 2 <= end) {
         const int32_t name = Package::readCompact(p, end);
         if (name == 0) {
@@ -377,10 +378,45 @@ static bool parseStaticMeshMaterials(const Package& pkg, int exportIndex,
             if (count < 0 || count > 1024) {
                 return false;
             }
+            // Each element is a "StaticMeshMaterial" struct serialized as two
+            // tagged sub-properties in reverse link order: "EnableCollision"
+            // (bool) then "Material" (object). Extract the object field.
             for (int32_t k = 0; k < count; ++k) {
-                if (p >= end) return false;
-                outMaterials.push_back(Package::readCompact(p, end));  // Material
-                p += 2;  // EnableCollision + OldEnableCollision
+                int32_t material = 0;
+                for (int f = 0; f < 2 && p + 2 <= end; ++f) {
+                    const int32_t sn = Package::readCompact(p, end);
+                    if (sn == 0) {
+                        break;
+                    }
+                    const uint8_t sinfo = *p++;
+                    const uint8_t styp = sinfo & 0x0F;
+                    if (styp == 10) {
+                        Package::readCompact(p, end);
+                    }
+                    const uint8_t ssc = sinfo & 0x70;
+                    int32_t ssize;
+                    if (ssc == 0x00) ssize = 1;
+                    else if (ssc == 0x10) ssize = 2;
+                    else if (ssc == 0x20) ssize = 4;
+                    else if (ssc == 0x30) ssize = 12;
+                    else if (ssc == 0x40) ssize = 16;
+                    else if (ssc == 0x50) { if (p >= end) return false; ssize = *p++; }
+                    else if (ssc == 0x60) { if (p + 2 > end) return false; ssize = rdu16(p); p += 2; }
+                    else { if (p + 4 > end) return false; ssize = rdi32(p); p += 4; }
+                    if ((sinfo & 0x80) && styp != 3) {
+                        const uint8_t b = *p++;
+                        if (b & 0x80) p += ((b & 0xC0) == 0x80) ? 1 : 3;
+                    }
+                    if (sn == nameMaterial && styp == 5) {
+                        material = Package::readCompact(p, end);
+                    } else if (styp == 3) {
+                    } else if (styp == 5 || styp == 6 || styp == 8) {
+                        Package::readCompact(p, end);
+                    } else {
+                        p += ssize;
+                    }
+                }
+                outMaterials.push_back(material);
             }
             return true;
         }
@@ -431,7 +467,7 @@ static bool resolveStaticMesh(const Package& mainPkg, int32_t mesh,
     if (pkgName.empty() || pkgName == "None") {
         return false;
     }
-    const std::string meshName = mainPkg.resolveIndex(im.objectName);
+    const std::string meshName = mainPkg.name(im.objectName);
 
     const std::string usxPath = "C:\\UT2004\\StaticMeshes\\" + pkgName + ".usx";
     for (auto& cached : cache) {
