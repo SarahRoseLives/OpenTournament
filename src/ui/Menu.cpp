@@ -1,5 +1,6 @@
 #include "ui/Menu.h"
 
+#include "core/Platform.h"
 #include "render/Font.h"
 
 namespace ot {
@@ -10,6 +11,11 @@ const glm::vec3 kTitleColor(1.0f, 1.0f, 1.0f);
 const glm::vec3 kItemColor(0.62f, 0.66f, 0.72f);
 const glm::vec3 kSelectedColor(0.25f, 1.0f, 0.45f);
 const glm::vec3 kHintColor(0.42f, 0.46f, 0.52f);
+
+// Menu item layout (shared by rendering and touch hit-testing). Values are in
+// normalized device coordinates (-1..1).
+constexpr float kItemTop = 0.22f;
+constexpr float kItemStep = 0.14f;
 
 void pushCentered(std::vector<float>& out, const std::string& text,
                   float cx, float y, float scale, const glm::vec3& color) {
@@ -38,7 +44,11 @@ MenuAction Menu::activate() {
     }
     switch (m_selected) {
         case 0: return MenuAction::PlayOffline;
+#if OT_PLATFORM_ANDROID
+        case 1: return MenuAction::JoinServer;  // no keyboard: resolve IP from file in runGame
+#else
         case 1: m_ipEntry = true; return MenuAction::None;
+#endif
         case 2: return MenuAction::GenerateMap;
         default: return MenuAction::Quit;
     }
@@ -50,6 +60,23 @@ MenuAction Menu::cancel() {
         return MenuAction::None;
     }
     return MenuAction::Quit;
+}
+
+MenuAction Menu::touchAt(float ndcX, float ndcY) {
+    (void)ndcX;
+    if (m_ipEntry) {
+        m_ipEntry = false;
+        return MenuAction::None;
+    }
+    const float half = kItemStep * 0.5f;
+    for (size_t i = 0; i < m_items.size(); ++i) {
+        const float cy = kItemTop - static_cast<float>(i) * kItemStep;
+        if (ndcY >= cy - half && ndcY <= cy + half) {
+            m_selected = static_cast<int>(i);
+            return activate();
+        }
+    }
+    return MenuAction::None;
 }
 
 MenuAction Menu::handleEvent(const SDL_Event& event) {
@@ -94,6 +121,10 @@ MenuAction Menu::handleEvent(const SDL_Event& event) {
         } else if (b == SDL_CONTROLLER_BUTTON_B) {
             return cancel();
         }
+    } else if (event.type == SDL_FINGERDOWN) {
+        const float ndcX = event.tfinger.x * 2.0f - 1.0f;
+        const float ndcY = 1.0f - event.tfinger.y * 2.0f;
+        return touchAt(ndcX, ndcY);
     }
     return MenuAction::None;
 }
@@ -112,8 +143,8 @@ void Menu::buildVertices(std::vector<float>& out) const {
     }
 
     const float itemScale = 0.08f;
-    const float step = 0.14f;
-    const float top = 0.22f;
+    const float top = kItemTop;
+    const float step = kItemStep;
     for (size_t i = 0; i < m_items.size(); ++i) {
         const float y = top - static_cast<float>(i) * step;
         const bool selected = static_cast<int>(i) == m_selected;
@@ -122,7 +153,11 @@ void Menu::buildVertices(std::vector<float>& out) const {
                      selected ? kSelectedColor : kItemColor);
     }
 
+#if OT_PLATFORM_ANDROID
+    pushCentered(out, "TAP TO SELECT", 0.0f, -0.82f, 0.05f, kHintColor);
+#else
     pushCentered(out, "W/S: SELECT   ENTER: OK   ESC: QUIT", 0.0f, -0.82f, 0.05f, kHintColor);
+#endif
 }
 
 } // namespace ot

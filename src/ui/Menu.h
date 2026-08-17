@@ -35,6 +35,7 @@ private:
     void move(int delta);
     MenuAction activate();
     MenuAction cancel();
+    MenuAction touchAt(float ndcX, float ndcY);
 
     std::vector<std::string> m_items;
     int m_selected = 0;
