@@ -10,5 +10,11 @@
 bool ue2ToOtMap(const std::string& ut2Path, const std::string& ut2004Root,
                 ot::map::Map& out);
 
+// Convert a UT99 (Unreal Tournament, UE1) map (.unr) into an OpenTournament
+// map (.otmap). Returns true on success. (Declared here so the server can call
+// both converters; implemented in tools/ue1/Convert.cpp.)
+bool ue1ToOtMap(const std::string& unrPath, const std::string& ut99Root,
+                ot::map::Map& out);
+
 // The ue2tool command-line entry point (thin CLI around the parsing helpers).
 int ue2tool_main(int argc, char** argv);

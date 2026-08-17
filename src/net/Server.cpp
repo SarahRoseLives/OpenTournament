@@ -23,13 +23,12 @@ using namespace net;
 #if !OT_PLATFORM_ANDROID
 namespace {
 
-bool endsWithUt2(const std::string& s) {
+bool endsWithExt(const std::string& s, const char* ext) {
     const size_t dot = s.find_last_of('.');
     if (dot == std::string::npos) {
         return false;
     }
-    const std::string ext = s.substr(dot);
-    return ext == ".ut2" || ext == ".unr";
+    return s.substr(dot) == ext;
 }
 
 }  // namespace
@@ -39,7 +38,8 @@ Server::~Server() {
     stop();
 }
 
-bool Server::start(uint16_t port, const std::string& mapPath, const std::string& ut2004Root) {
+bool Server::start(uint16_t port, const std::string& mapPath, const std::string& ut2004Root,
+                   const std::string& ut99Root) {
     if (enet_initialize() != 0) {
         std::printf("[ot] enet_initialize failed\n");
         return false;
@@ -58,11 +58,15 @@ bool Server::start(uint16_t port, const std::string& mapPath, const std::string&
     // Load and generate the map to host (or fall back to the default arena).
     if (!mapPath.empty()) {
 #if !OT_PLATFORM_ANDROID
-        // Original UT2004 maps are converted in memory at startup, so the
-        // server can host a .ut2 directly (no offline conversion step).
-        if (endsWithUt2(mapPath)) {
+        // Original maps are converted in memory at startup, so the server can
+        // host a .ut2 (UT2004) or .unr (UT99) directly.
+        const bool isUnr = endsWithExt(mapPath, ".unr");
+        const bool isUt2 = endsWithExt(mapPath, ".ut2");
+        if (isUnr || isUt2) {
             map::Map converted;
-            if (ue2ToOtMap(mapPath, ut2004Root, converted)) {
+            const bool ok = isUnr ? ue1ToOtMap(mapPath, ut99Root, converted)
+                                  : ue2ToOtMap(mapPath, ut2004Root, converted);
+            if (ok) {
                 std::vector<uint8_t> bytes;
                 if (map::saveMap(converted, bytes)) {
                     m_mapText.assign(reinterpret_cast<const char*>(bytes.data()),

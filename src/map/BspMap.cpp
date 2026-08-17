@@ -197,20 +197,27 @@ std::vector<float> buildMesh(const Map& bsp, const TextureAtlas* atlas) {
         const std::string& name = (mat >= 0 && mat < static_cast<int>(bsp.materials.size()))
                                       ? bsp.materials[mat]
                                       : "";
+        const int tex = mesh.textureIndex[i / 3];
         const float shade = 0.5f + 0.5f * std::fabs(glm::dot(n, lightDir));
 
-        uint32_t h = 2166136261u;
-        for (char c : name) {
-            h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+        // Textured triangles use a neutral (white) vertex color so the texture
+        // shows through un-tinted; untextured triangles fall back to a stable
+        // per-material color derived from the material name.
+        glm::vec3 color(1.0f);
+        if (tex < 0) {
+            uint32_t h = 2166136261u;
+            for (char c : name) {
+                h = (h ^ static_cast<uint8_t>(c)) * 16777619u;
+            }
+            h ^= static_cast<uint32_t>(mat) * 2654435761u;
+            const float r = ((h >> 16) & 0xff) / 255.0f;
+            const float g = ((h >> 8) & 0xff) / 255.0f;
+            const float b = (h & 0xff) / 255.0f;
+            color = glm::vec3(0.45f + 0.55f * r, 0.45f + 0.55f * g, 0.45f + 0.55f * b);
         }
-        h ^= static_cast<uint32_t>(mat) * 2654435761u;
-        const float r = ((h >> 16) & 0xff) / 255.0f;
-        const float g = ((h >> 8) & 0xff) / 255.0f;
-        const float b = (h & 0xff) / 255.0f;
-        const glm::vec3 color = glm::vec3(0.25f + 0.75f * r, 0.25f + 0.75f * g, 0.25f + 0.75f * b) * shade;
+        color *= shade;
 
         // Per-texture atlas UV transform.
-        const int tex = mesh.textureIndex[i / 3];
         float su = 1.0f, sv = 1.0f, ou = 0.0f, ov = 0.0f;
         if (atlas && tex >= 0 && tex < static_cast<int>(atlas->uvScale.size())) {
             su = atlas->uvScale[tex * 2 + 0];

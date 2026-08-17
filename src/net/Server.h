@@ -24,7 +24,8 @@ public:
     ~Server();
 
     bool start(uint16_t port, const std::string& mapPath,
-               const std::string& ut2004Root = "C:\\UT2004");
+               const std::string& ut2004Root = "C:\\UT2004",
+               const std::string& ut99Root = "C:\\UnrealTournament");
     void stop();
     void run(float dt);
 

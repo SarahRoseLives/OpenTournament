@@ -90,15 +90,17 @@ if(WIN32 AND MINGW)
     )
 endif()
 
-# --- UE2 asset tooling (no SDL/GL dependency) ---
+# --- UE asset tooling (no SDL/GL dependency) ---
 add_library(ue2conv STATIC
     tools/ue2/main.cpp
     tools/ue2/UE2.cpp
+    tools/ue1/Convert.cpp
     src/map/MapFormat.cpp
 )
 target_include_directories(ue2conv PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/ue2
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/ue1
 )
 if(MSVC)
     target_compile_options(ue2conv PRIVATE /W4)
@@ -110,3 +112,8 @@ add_executable(ue2tool
     tools/ue2/ue2tool_main.cpp
 )
 target_link_libraries(ue2tool PRIVATE ue2conv)
+
+add_executable(ue1tool
+    tools/ue1/ue1tool_main.cpp
+)
+target_link_libraries(ue1tool PRIVATE ue2conv)

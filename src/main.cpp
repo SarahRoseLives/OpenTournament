@@ -1383,6 +1383,7 @@ int main(int argc, char* argv[]) {
     std::string mapPath;
     std::string genSeed;
     std::string ut2004Root = "C:\\UT2004";
+    std::string ut99Root = "C:\\UnrealTournament";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -1417,6 +1418,8 @@ int main(int argc, char* argv[]) {
             port = static_cast<uint16_t>(std::atoi(argv[++i]));
         } else if (arg == "--ut2004" && i + 1 < argc) {
             ut2004Root = argv[++i];
+        } else if (arg == "--ut99" && i + 1 < argc) {
+            ut99Root = argv[++i];
         }
     }
 
@@ -1452,7 +1455,7 @@ int main(int argc, char* argv[]) {
         std::setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
         ot::Server server;
-        if (!server.start(port, mapPath, ut2004Root)) {
+        if (!server.start(port, mapPath, ut2004Root, ut99Root)) {
             return 1;
         }
         double last = nowSeconds();

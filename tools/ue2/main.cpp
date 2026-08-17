@@ -1855,16 +1855,8 @@ bool ue2ToOtMap(const std::string& ut2Path, const std::string& ut2004Root, ot::m
             std::vector<TexEntry> textureEntries;
             std::vector<std::unique_ptr<Package>> cache;
 
-            auto addTexture = [&](const Package* tpkg, int tidx) -> int32_t {
-                const std::string tname = tpkg->exportName(tidx);
-                for (size_t k = 0; k < textureNames.size(); ++k) {
-                    if (textureNames[k] == tname) {
-                        return static_cast<int32_t>(k);
-                    }
-                }
-                textureNames.push_back(tname);
-                textureEntries.push_back({tpkg, tidx});
-                return static_cast<int32_t>(textureNames.size()) - 1;
+            auto addTexture = [&](const Package*, int) -> int32_t {
+                return -1;  // textures disabled: render BSP with solid colors
             };
 
             // UE2 is Z-up; our engine is Y-up: x->x, y->z, z->y.
