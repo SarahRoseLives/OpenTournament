@@ -57,6 +57,27 @@ void addBox(std::vector<float>& verts, const glm::vec3& min, const glm::vec3& ma
     addQuad(verts, c0, c1, c5, c4, bottom);
 }
 
+// Build a simple CTF flag: a pole plus a waving flag quad. The base sits at the
+// flag's home position (feet), and team 0 = red / team 1 = blue.
+void addFlag(std::vector<float>& verts, const glm::vec3& pos, int team) {
+    const float poleH = 160.0f;
+    const glm::vec3 poleColor(0.75f, 0.78f, 0.82f);
+    addBox(verts,
+           glm::vec3(pos.x - 6.0f, pos.y, pos.z - 6.0f),
+           glm::vec3(pos.x + 6.0f, pos.y + poleH, pos.z + 6.0f),
+           poleColor);
+
+    const glm::vec3 flagColor = team == 1 ? glm::vec3(0.25f, 0.45f, 1.0f)
+                                          : glm::vec3(1.0f, 0.25f, 0.25f);
+    const float top = pos.y + poleH - 4.0f;
+    const float bottom = top - 50.0f;
+    const glm::vec3 a(pos.x, top, pos.z);
+    const glm::vec3 b(pos.x + 70.0f, top, pos.z);
+    const glm::vec3 c(pos.x + 55.0f, bottom, pos.z);
+    const glm::vec3 d(pos.x, bottom, pos.z);
+    addQuad(verts, a, b, c, d, flagColor);
+}
+
 } // namespace
 
 void Level::build() {
@@ -105,6 +126,7 @@ void Level::destroy() {
     m_floorMesh.destroy();
     m_boxMesh.destroy();
     m_mapMesh.destroy();
+    m_flagMesh.destroy();
     if (m_mapTexture) {
         glDeleteTextures(1, &m_mapTexture);
         m_mapTexture = 0;
@@ -143,6 +165,19 @@ void Level::buildFromBsp(const map::Map& bsp) {
         m_mapMesh.upload(map::buildMesh(bsp, &atlas));
     } else {
         m_mapMesh.upload(map::buildMesh(bsp, nullptr));
+    }
+
+    // CTF flag markers: one pole + flag per home base.
+    m_flagMesh.destroy();
+    m_flagPositions.clear();
+    std::vector<float> flagVerts;
+    for (const auto& fp : bsp.flags) {
+        const glm::vec3 pos(fp.position.x, fp.position.y, fp.position.z);
+        addFlag(flagVerts, pos, fp.team);
+        m_flagPositions.push_back(pos);
+    }
+    if (!flagVerts.empty()) {
+        m_flagMesh.upload(flagVerts);
     }
 }
 

@@ -1197,6 +1197,8 @@ static bool writePpm(const std::string& path, const std::vector<uint8_t>& rgba,
 
 static void usage() {
     std::fprintf(stderr, "usage: ue2tool dump <file.ut2>\n");
+    std::fprintf(stderr, "       ue2tool list <file> [class/name filter]\n");
+    std::fprintf(stderr, "       ue2tool props <file> <exportIndex>\n");
     std::fprintf(stderr, "       ue2tool names <file.ut2> <start> <count>\n");
     std::fprintf(stderr, "       ue2tool hex <file.ut2> <offset> <len>\n");
     std::fprintf(stderr, "       ue2tool extract <file.ut2> [--obj] [--out <path>]\n");
@@ -1237,6 +1239,105 @@ int ue2tool_main(int argc, char** argv) {
         int count = argc > 4 ? std::atoi(argv[4]) : 20;
         for (int i = start; i < start + count; ++i) {
             std::printf("[%d] %s\n", i, pkg.name(i).c_str());
+        }
+        return 0;
+    }
+
+    if (cmd == "list") {
+        const std::string filter = argc > 3 ? argv[3] : "";
+        for (int i = 0; i < pkg.exportCount(); ++i) {
+            const std::string cls = pkg.exportClass(i);
+            if (!filter.empty() && cls.find(filter) == std::string::npos &&
+                pkg.exportName(i).find(filter) == std::string::npos) {
+                continue;
+            }
+            const auto& e = pkg.exp(i);
+            std::printf("[%d] class=%-20s name=%-30s outer=%d size=%d off=%d\n",
+                        i, cls.c_str(), pkg.exportName(i).c_str(), e.package,
+                        e.serialSize, e.serialOffset);
+        }
+        return 0;
+    }
+
+    if (cmd == "props") {
+        const int idx = argc > 3 ? std::atoi(argv[3]) : 0;
+        if (idx < 0 || idx >= pkg.exportCount()) {
+            std::fprintf(stderr, "bad export index\n");
+            return 1;
+        }
+        const auto& e = pkg.exp(idx);
+        if (e.serialSize <= 0) {
+            return 0;
+        }
+        const uint8_t* base = pkg.data();
+        const uint8_t* p = base + e.serialOffset;
+        const uint8_t* end = p + e.serialSize;
+        const uint8_t* hardEnd = base + pkg.size();
+        if (end > hardEnd) end = hardEnd;
+
+        const int32_t node = Package::readCompact(p, end);
+        Package::readCompact(p, end);  // StateNode
+        p += 8;                        // ProbeMask
+        p += 4;                        // LatentAction
+        if (node != 0) {
+            Package::readCompact(p, end);  // Offset
+        }
+
+        const int32_t noneIdx = findNameIndex(pkg, "None");
+        while (p + 2 <= end) {
+            const int32_t name = Package::readCompact(p, end);
+            if (name == noneIdx) break;
+            const uint8_t info = *p++;
+            const uint8_t typ = info & 0x0F;
+            int32_t item = -1;
+            if (typ == 10) {
+                item = Package::readCompact(p, end);
+            }
+            const uint8_t sc = info & 0x70;
+            int32_t vsize;
+            if (sc == 0x00) vsize = 1;
+            else if (sc == 0x10) vsize = 2;
+            else if (sc == 0x20) vsize = 4;
+            else if (sc == 0x30) vsize = 12;
+            else if (sc == 0x40) vsize = 16;
+            else if (sc == 0x50) { if (p >= end) break; vsize = *p++; }
+            else if (sc == 0x60) { if (p + 2 > end) break; vsize = rdu16(p); p += 2; }
+            else { if (p + 4 > end) break; vsize = rdi32(p); p += 4; }
+            if ((info & 0x80) && typ != 3) {
+                const uint8_t b = *p++;
+                if (b & 0x80) p += ((b & 0xC0) == 0x80) ? 1 : 3;
+            }
+            std::printf("  %-20s typ=%d", pkg.name(name).c_str(), typ);
+            if (item >= 0) {
+                std::printf(" item=%s", pkg.name(item).c_str());
+            }
+            std::printf(" size=%d", vsize);
+            if (typ == 2 && p + 4 <= end) {  // int
+                std::printf(" val=%d", rdi32(p));
+            } else if (typ == 4 && p + 4 <= end) {  // float
+                std::printf(" val=%f", rdFloat(p));
+            } else if (typ == 1 && p + 1 <= end) {  // byte
+                std::printf(" val=%d", p[0]);
+            } else if (typ == 10 && item >= 0 && vsize == 12 && p + 12 <= end) {
+                const std::string itemName = pkg.name(item);
+                if (itemName == "Vector") {
+                    std::printf(" val=(%f, %f, %f)", rdFloat(p), rdFloat(p + 4), rdFloat(p + 8));
+                } else if (itemName == "Rotator") {
+                    std::printf(" val=(%d, %d, %d)", rdi32(p), rdi32(p + 4), rdi32(p + 8));
+                }
+            } else if (typ == 5 && vsize == 4 && p + 4 <= end) {  // name index
+                const int32_t ni = rdi32(p);
+                if (ni >= 0 && ni < static_cast<int32_t>(pkg.nameCount())) {
+                    std::printf(" val=%s", pkg.name(ni).c_str());
+                }
+            }
+            std::printf("\n");
+            if (typ == 3) {
+                // bool: no bytes follow
+            } else {
+                if (p + vsize > end) break;
+                p += vsize;
+            }
         }
         return 0;
     }
@@ -1817,6 +1918,34 @@ bool ue2ToOtMap(const std::string& ut2Path, const std::string& ut2004Root, ot::m
         }
         std::printf("player starts=%zu\n", spawns.size());
 
+        // CTF flag bases: xRedFlagBase / xBlueFlagBase. Team comes from the
+        // class name; the flag's Location is its home position.
+        std::vector<ot::map::FlagPoint> flagPoints;
+        if (nameLoc >= 0 && nameVec >= 0) {
+            for (int i = 0; i < pkg.exportCount(); ++i) {
+                const std::string cls = pkg.exportClass(i);
+                int team = -1;
+                if (cls == "xRedFlagBase") {
+                    team = 0;
+                } else if (cls == "xBlueFlagBase") {
+                    team = 1;
+                } else {
+                    continue;
+                }
+                const auto& e = pkg.exp(i);
+                if (e.serialSize <= 0) {
+                    continue;
+                }
+                PlayerStartData sd;
+                if (parsePlayerStart(pkg, base, pkg.size(), base + e.serialOffset,
+                                     e.serialSize, nameLoc, nameVec, nameRot,
+                                     nameRotator, sd)) {
+                    flagPoints.push_back({{sd.x, sd.z, sd.y}, team});
+                }
+            }
+        }
+        std::printf("flags=%zu\n", flagPoints.size());
+
         std::vector<std::string> matNames(surfCount);
         for (int32_t i = 0; i < surfCount; ++i) {
             matNames[i] = pkg.resolveIndex(surfs[i].material);
@@ -2297,6 +2426,8 @@ bool ue2ToOtMap(const std::string& ut2Path, const std::string& ut2004Root, ot::m
                 map.spawnYaw.push_back(static_cast<float>(sd.yaw) * (6.28318531f / 65536.0f) +
                                        1.57079633f);
             }
+
+            map.flags = std::move(flagPoints);
 
             out = std::move(map);
         }

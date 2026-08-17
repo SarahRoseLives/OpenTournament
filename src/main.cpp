@@ -319,9 +319,15 @@ int runViewer(const std::string& mapPath) {
             bmin = glm::min(bmin, p);
             bmax = glm::max(bmax, p);
         }
-        std::printf("[ot] bsp map: %s, %zu points, %zu nodes, %zu triangles, %zu materials\n",
+        std::printf("[ot] bsp map: %s, %zu points, %zu nodes, %zu triangles, %zu materials, %zu flags\n",
                     mapPath.c_str(), bsp.points.size(), bsp.nodes.size(),
-                    mesh.positions.size() / 3, bsp.materials.size());
+                    mesh.positions.size() / 3, bsp.materials.size(), bsp.flags.size());
+        for (size_t i = 0; i < bsp.flags.size(); ++i) {
+            std::printf("[ot] flag %zu: team=%d (%.0f %.0f %.0f)\n", i,
+                        bsp.flags[i].team,
+                        bsp.flags[i].position.x, bsp.flags[i].position.y,
+                        bsp.flags[i].position.z);
+        }
     } else if (endsWith(mapPath, ".otmap")) {
         ot::map::GenParams params;
         std::string name;
@@ -818,7 +824,10 @@ int runGen(const std::string& seedStr) {
 
         renderer.beginFrame();
         const glm::mat4 viewProj = player.camera().viewProj();
+        renderer.bindTexture(level.mapTexture());
         renderer.draw(level.mapMesh(), viewProj);
+        renderer.bindTexture(0);
+        renderer.draw(level.flagMesh(), viewProj);
 
         const auto& tracers = weapon.tracers();
         if (!tracers.empty()) {
@@ -1071,6 +1080,7 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
             renderer.bindTexture(level.mapTexture());
             renderer.draw(level.mapMesh(), viewProj);
             renderer.bindTexture(0);
+            renderer.draw(level.flagMesh(), viewProj);
         } else {
             renderer.draw(level.floorMesh(), viewProj);
             renderer.draw(level.boxMesh(), viewProj);

@@ -176,6 +176,20 @@ bool saveMap(const Map& map, std::vector<uint8_t>& out) {
         textures = w.data();
     }
 
+    // CTF flags.
+    std::vector<uint8_t> flags;
+    {
+        Writer w;
+        w.u32(static_cast<uint32_t>(map.flags.size()));
+        for (const auto& f : map.flags) {
+            w.f32(f.position.x);
+            w.f32(f.position.y);
+            w.f32(f.position.z);
+            w.u8(static_cast<uint8_t>(f.team));
+        }
+        flags = w.data();
+    }
+
     // Assemble the file.
     std::vector<uint8_t> file;
     file.resize(kHeaderSize);
@@ -197,6 +211,7 @@ bool saveMap(const Map& map, std::vector<uint8_t>& out) {
         {static_cast<uint32_t>(SectionId::PlayerStarts), &starts},
         {static_cast<uint32_t>(SectionId::Materials), &materials},
         {static_cast<uint32_t>(SectionId::Textures), &textures},
+        {static_cast<uint32_t>(SectionId::CtfFlags), &flags},
     };
 
     // Section table size: 4 (count) + sections * 12.
@@ -379,6 +394,15 @@ bool loadMap(Map& map, const uint8_t* data, size_t bufSize) {
                 if (rgbaLen > 0) {
                     s.bytes(map.textures[k].rgba.data(), rgbaLen);
                 }
+            }
+        } else if (id == static_cast<uint32_t>(SectionId::CtfFlags)) {
+            const uint32_t count = s.u32();
+            map.flags.resize(count);
+            for (uint32_t k = 0; k < count; ++k) {
+                map.flags[k].position.x = s.f32();
+                map.flags[k].position.y = s.f32();
+                map.flags[k].position.z = s.f32();
+                map.flags[k].team = static_cast<int32_t>(s.u8());
             }
         }
     }

@@ -20,11 +20,12 @@
 //   2 = PLAYER_STARTS (count, then per start: pos(3f) + yaw(1f))
 //   3 = MATERIALS (count, then per material: u32 len + utf8 bytes)
 //   4 = TEXTURES (count, then per texture: name len + name, u32 w, u32 h, u32 rgba bytes, rgba data)
+//   5 = CTF_FLAGS (count, then per flag: pos(3f) + team(1 byte))
 
 namespace ot::map {
 
 constexpr uint32_t kMagic = 0x4F544D50u;
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 constexpr uint32_t kHeaderSize = 80;
 
 enum class SectionId : uint32_t {
@@ -32,6 +33,7 @@ enum class SectionId : uint32_t {
     PlayerStarts = 2,
     Materials = 3,
     Textures = 4,
+    CtfFlags = 5,
 };
 
 struct Vec3 {
@@ -83,6 +85,12 @@ struct TextureData {
     std::vector<uint8_t> rgba;
 };
 
+// A CTF flag home position. team = 0 (red) or 1 (blue).
+struct FlagPoint {
+    Vec3 position{0.0f};
+    int32_t team = 0;
+};
+
 struct Map {
     char name[64] = {0};
     std::vector<Vec3> points;      // vertex pool
@@ -93,6 +101,7 @@ struct Map {
     std::vector<float> spawnYaw;
     std::vector<std::string> materials;
     std::vector<TextureData> textures;
+    std::vector<FlagPoint> flags;  // CTF flag home positions
 };
 
 uint32_t crc32(const uint8_t* data, size_t size);

@@ -51,6 +51,79 @@ struct PlayerStart {
     int32_t yaw = 0;
 };
 
+// Walks an actor export's execution-stack state frame + tagged-property stream,
+// extracting Location, Rotation yaw, and Team. Returns true if a Location was
+// found. Shared by PlayerStart and FlagBase parsing.
+struct ActorTransform {
+    float x = 0, y = 0, z = 0;
+    int32_t yaw = 0;
+    int team = 0;
+    bool haveLoc = false;
+};
+
+bool parseActorProps(const Package& pkg, const uint8_t* base, size_t baseSize,
+                     const uint8_t* p, size_t size, ActorTransform& out) {
+    const uint8_t* hardEnd = base + baseSize;
+    const uint8_t* aend = p + size;
+    if (aend > hardEnd) aend = hardEnd;
+
+    const int32_t noneIdx = findNameIndex(pkg, "None");
+    const int32_t nameLoc = findNameIndex(pkg, "Location");
+    const int32_t nameVec = findNameIndex(pkg, "Vector");
+    const int32_t nameRot = findNameIndex(pkg, "Rotation");
+    const int32_t nameRotator = findNameIndex(pkg, "Rotator");
+    const int32_t nameTeam = findNameIndex(pkg, "Team");
+
+    // Execution-stack state frame: Node, StateNode, ProbeMask(8),
+    // LatentAction(4), then Offset (only if Node != 0).
+    const int32_t node = Package::readCompact(p, aend);
+    Package::readCompact(p, aend);  // StateNode
+    p += 8;                        // ProbeMask (QWORD)
+    p += 4;                        // LatentAction (INT)
+    if (node != 0) {
+        Package::readCompact(p, aend);  // Offset
+    }
+
+    while (p + 2 <= aend) {
+        const int32_t name = Package::readCompact(p, aend);
+        if (name == noneIdx) break;
+        const uint8_t info = *p++;
+        const uint8_t typ = info & 0x0F;
+        int32_t item = -1;
+        if (typ == 10) item = Package::readCompact(p, aend);
+        const uint8_t sc = info & 0x70;
+        int32_t size;
+        if (sc == 0x00) size = 1;
+        else if (sc == 0x10) size = 2;
+        else if (sc == 0x20) size = 4;
+        else if (sc == 0x30) size = 12;
+        else if (sc == 0x40) size = 16;
+        else if (sc == 0x50) { if (p >= aend) break; size = *p++; }
+        else if (sc == 0x60) { if (p + 2 > aend) break; size = rdi32(p) & 0xffff; p += 2; }
+        else { if (p + 4 > aend) break; size = rdi32(p); p += 4; }
+        if ((info & 0x80) && typ != 3) {
+            const uint8_t b = *p++;
+            if (b & 0x80) p += ((b & 0xC0) == 0x80) ? 1 : 3;
+        }
+        if (name == nameLoc && typ == 10 && item == nameVec && p + 12 <= aend) {
+            out.x = rdFloat(p); out.y = rdFloat(p + 4); out.z = rdFloat(p + 8);
+            p += 12;
+            out.haveLoc = true;
+        } else if (name == nameRot && typ == 10 && item == nameRotator && p + 12 <= aend) {
+            out.yaw = rdi32(p + 4);
+            p += 12;
+        } else if (name == nameTeam && typ == 1 && p + 1 <= aend) {
+            out.team = p[0];
+            p += 1;
+        } else if (typ == 3) {
+            // bool: value is stored in the info byte's array flag, no bytes follow.
+        } else {
+            p += size;
+        }
+    }
+    return out.haveLoc;
+}
+
 }  // namespace
 
 bool ue1ToOtMap(const std::string& unrPath, const std::string& ut99Root,
@@ -277,58 +350,16 @@ bool ue1ToOtMap(const std::string& unrPath, const std::string& ut99Root,
     const int32_t nameVec = findNameIndex(pkg, "Vector");
     const int32_t nameRot = findNameIndex(pkg, "Rotation");
     const int32_t nameRotator = findNameIndex(pkg, "Rotator");
-    const int32_t noneIdx = findNameIndex(pkg, "None");
     std::vector<PlayerStart> spawns;
     for (int i = 0; i < pkg.exportCount(); ++i) {
         if (pkg.exportClass(i) != "PlayerStart") continue;
         const auto& e = pkg.exp(i);
         if (e.serialSize <= 0) continue;
-        const uint8_t* ap = pkg.data() + e.serialOffset;
-        const uint8_t* aend = ap + e.serialSize;
-        if (aend > hardEnd) aend = hardEnd;
-        // Execution-stack state frame: Node, StateNode, ProbeMask(8),
-        // LatentAction(4), then Offset (only if Node != 0).
-        const int32_t node = Package::readCompact(ap, aend);
-        Package::readCompact(ap, aend);  // StateNode
-        ap += 8;                        // ProbeMask (QWORD)
-        ap += 4;                        // LatentAction (INT)
-        if (node != 0) {
-            Package::readCompact(ap, aend);  // Offset
-        }
-        PlayerStart ps;
-        while (ap + 2 <= aend) {
-            const int32_t name = Package::readCompact(ap, aend);
-            if (name == noneIdx) break;
-            const uint8_t info = *ap++;
-            const uint8_t typ = info & 0x0F;
-            int32_t item = -1;
-            if (typ == 10) item = Package::readCompact(ap, aend);
-            const uint8_t sc = info & 0x70;
-            int32_t size;
-            if (sc == 0x00) size = 1;
-            else if (sc == 0x10) size = 2;
-            else if (sc == 0x20) size = 4;
-            else if (sc == 0x30) size = 12;
-            else if (sc == 0x40) size = 16;
-            else if (sc == 0x50) { if (ap >= aend) break; size = *ap++; }
-            else if (sc == 0x60) { if (ap + 2 > aend) break; size = rdi32(ap) & 0xffff; ap += 2; }
-            else { if (ap + 4 > aend) break; size = rdi32(ap); ap += 4; }
-            if ((info & 0x80) && typ != 3) {
-                const uint8_t b = *ap++;
-                if (b & 0x80) ap += ((b & 0xC0) == 0x80) ? 1 : 3;
-            }
-            if (name == nameLoc && typ == 10 && item == nameVec && ap + 12 <= aend) {
-                ps.x = rdFloat(ap); ps.y = rdFloat(ap + 4); ps.z = rdFloat(ap + 8);
-                ap += 12;
-            } else if (name == nameRot && typ == 10 && item == nameRotator && ap + 12 <= aend) {
-                ps.yaw = rdi32(ap + 4);
-                ap += 12;
-            } else if (typ == 3) {
-            } else {
-                ap += size;
-            }
-        }
-        if (ps.x != 0 || ps.y != 0 || ps.z != 0) {
+        ActorTransform at;
+        if (parseActorProps(pkg, base, pkg.size(), base + e.serialOffset,
+                            static_cast<size_t>(e.serialSize), at)) {
+            PlayerStart ps;
+            ps.x = at.x; ps.y = at.y; ps.z = at.z; ps.yaw = at.yaw;
             spawns.push_back(ps);
         }
     }
@@ -338,10 +369,22 @@ bool ue1ToOtMap(const std::string& unrPath, const std::string& ut99Root,
         out.spawnYaw.push_back(static_cast<float>(sd.yaw) * (6.28318531f / 65536.0f) + 1.57079633f);
     }
 
+    // CTF flag bases (FlagBase with a Team byte: 0 = red, 1 = blue).
+    for (int i = 0; i < pkg.exportCount(); ++i) {
+        if (pkg.exportClass(i) != "FlagBase") continue;
+        const auto& e = pkg.exp(i);
+        if (e.serialSize <= 0) continue;
+        ActorTransform at;
+        if (parseActorProps(pkg, base, pkg.size(), base + e.serialOffset,
+                            static_cast<size_t>(e.serialSize), at)) {
+            out.flags.push_back({{at.x, at.z, at.y}, at.team});
+        }
+    }
+
     out.materials = materials;
     std::strncpy(out.name, pkg.exportName(modelIdx).c_str(), sizeof(out.name) - 1);
-    std::printf("[ue1] built %zu points, %zu nodes, %zu surfs, %zu spawns, %zu materials\n",
+    std::printf("[ue1] built %zu points, %zu nodes, %zu surfs, %zu spawns, %zu flags, %zu materials\n",
                 out.points.size(), out.nodes.size(), out.surfaces.size(),
-                out.spawnPoints.size(), out.materials.size());
+                out.spawnPoints.size(), out.flags.size(), out.materials.size());
     return true;
 }
