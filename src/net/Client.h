@@ -31,6 +31,16 @@ struct RemotePlayer {
     float pitch = 0.0f;
     int health = kMaxHealth;
     int score = 0;
+    int team = 0;
+    bool carrying = false;
+};
+
+struct RemoteFlag {
+    int team = 0;
+    FlagState state = FlagState::Home;
+    glm::vec3 home{0.0f};
+    glm::vec3 pos{0.0f};
+    uint32_t carrierId = 0;
 };
 
 // Network client with client-side prediction, reconciliation, and entity
@@ -49,7 +59,11 @@ public:
     uint32_t localId() const { return m_localId; }
     int localHealth() const { return m_localHealth; }
     int localScore() const { return m_localScore; }
+    int localTeam() const { return m_localTeam; }
+    bool localCarrying() const { return m_localCarrying; }
     const std::vector<RemotePlayer>& remotePlayers() const { return m_remote; }
+    const std::vector<RemoteFlag>& flags() const { return m_flags; }
+    int teamScore(int team) const { return team >= 0 && team < 2 ? m_teamScore[team] : 0; }
 
     bool mapReceived() const { return m_mapReady; }
     const std::string& mapText() const { return m_mapText; }
@@ -69,6 +83,7 @@ private:
     void onPlayerLeft(PacketReader& reader);
     void onMapData(PacketReader& reader);
     void onMapChunk(PacketReader& reader);
+    void onFlagState(PacketReader& reader);
     void reconcile(const PlayerState& state, uint32_t lastAcked);
     void interpolate();
 
@@ -86,6 +101,11 @@ private:
 
     int m_localHealth = kMaxHealth;
     int m_localScore = 0;
+    int m_localTeam = 0;
+    bool m_localCarrying = false;
+
+    std::vector<RemoteFlag> m_flags;
+    int m_teamScore[2] = {0, 0};
 
     bool m_mapReady = false;
     std::string m_mapText;

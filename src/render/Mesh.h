@@ -13,6 +13,9 @@ public:
     void renderLines() const;
     void destroy();
 
+    int vertexCount() const { return m_vertexCount; }
+    bool empty() const { return m_vertexCount == 0; }
+
 private:
     unsigned int m_vao = 0;
     unsigned int m_vbo = 0;

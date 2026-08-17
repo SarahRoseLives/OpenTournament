@@ -128,6 +128,24 @@ bool Server::start(uint16_t port, const std::string& mapPath, const std::string&
             }
             std::printf("[ot] hosting bsp map (%zu nodes, %zu surfs, %zu spawns)\n",
                         bsp.nodes.size(), bsp.surfaces.size(), m_spawns.size());
+
+            // CTF flag bases, if the map carries them (2-team CTF).
+            m_ctf = bsp.flags.size() == 2;
+            m_flags.clear();
+            if (m_ctf) {
+                for (const auto& fp : bsp.flags) {
+                    ServerFlag flag;
+                    flag.team = fp.team;
+                    flag.home = glm::vec3(fp.position.x, fp.position.y, fp.position.z);
+                    flag.pos = flag.home;
+                    flag.state = FlagState::Home;
+                    m_flags.push_back(flag);
+                }
+                m_teamScore[0] = 0;
+                m_teamScore[1] = 0;
+                std::printf("[ot] hosting CTF (%zu flag bases, score cap %d)\n",
+                            m_flags.size(), kScoreCap);
+            }
         } else {
             std::printf("[ot] failed to load bsp map; using default arena\n");
             auto world = std::make_unique<CollisionWorld>();
@@ -230,6 +248,9 @@ void Server::handlePacket(ENetPeer* peer, const ENetPacket* packet) {
                 player->name[kMaxNameLen - 1] = '\0';
                 sendWelcome(player);
                 sendMapData(player);
+                if (m_ctf) {
+                    sendFlagState();
+                }
             }
             break;
         }
@@ -265,18 +286,41 @@ Server::ServerPlayer* Server::createPlayer(ENetPeer* peer) {
     auto player = std::make_unique<ServerPlayer>();
     player->peer = peer;
     player->id = m_nextId++;
+
+    if (m_ctf) {
+        // Balance teams: join the smaller one.
+        int counts[2] = {0, 0};
+        for (const auto& p : m_players) {
+            counts[p->team]++;
+        }
+        player->team = counts[0] <= counts[1] ? 0 : 1;
+    }
+
     player->health = kMaxHealth;
-    player->player.spawn(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
+    player->player.spawn(spawnForPlayer(*player) + glm::vec3(0, Player::kHalfHeight, 0),
                          spawnYawForId(player->id));
 
     ServerPlayer* raw = player.get();
     peer->data = raw;
     m_players.push_back(std::move(player));
-    std::printf("[ot] player %u joined\n", raw->id);
+    std::printf("[ot] player %u joined (team %d%s)\n", raw->id, raw->team,
+                m_ctf ? "" : " [dm]");
     return raw;
 }
 
 void Server::removePlayer(ServerPlayer* player) {
+    // Drop any flag the departing player carried.
+    if (m_ctf) {
+        for (auto& flag : m_flags) {
+            if (flag.state == FlagState::Carried && flag.carrierId == player->id) {
+                flag.state = FlagState::Dropped;
+                flag.pos = player->player.center();
+                flag.returnTimer = kFlagReturnTime;
+            }
+        }
+        sendFlagState();
+    }
+
     for (auto it = m_players.begin(); it != m_players.end(); ++it) {
         if (it->get() == player) {
             m_players.erase(it);
@@ -295,12 +339,27 @@ void Server::removePlayer(ServerPlayer* player) {
 void Server::respawn(ServerPlayer* player) {
     player->health = kMaxHealth;
     player->input.weapon = 0;
-    player->player.setState(spawnPointForId(player->id) + glm::vec3(0, Player::kHalfHeight, 0),
+    player->player.setState(spawnForPlayer(*player) + glm::vec3(0, Player::kHalfHeight, 0),
                             spawnYawForId(player->id), 0.0f);
+}
+
+glm::vec3 Server::spawnForPlayer(const ServerPlayer& player) const {
+    if (m_ctf && player.team >= 0 && player.team < 2) {
+        for (const auto& flag : m_flags) {
+            if (flag.team == player.team) {
+                return flag.home;
+            }
+        }
+    }
+    return spawnPointForId(player.id);
 }
 
 void Server::step() {
     m_tick++;
+
+    if (m_ctf) {
+        updateFlags();
+    }
 
     for (auto& player : m_players) {
         player->player.applyInput(player->input, kTick, *m_world);
@@ -316,6 +375,14 @@ void Server::step() {
     if (m_ticksSinceSnapshot >= kSnapshotEveryTicks) {
         m_ticksSinceSnapshot = 0;
         sendSnapshots();
+    }
+
+    // Refresh flag state to clients a few times per second so late joiners
+    // (and any dropped reliable packets) converge quickly.
+    m_ticksSinceFlagState++;
+    if (m_ctf && m_ticksSinceFlagState >= 8) {
+        m_ticksSinceFlagState = 0;
+        sendFlagState();
     }
 }
 
@@ -354,7 +421,144 @@ void Server::shoot(ServerPlayer& shooter) {
         victim->health = 0;
         shooter.score++;
         std::printf("[ot] player %u killed player %u\n", shooter.id, victim->id);
+
+        // The victim drops any flag they were carrying.
+        victim->carryingFlag = false;
+        if (m_ctf) {
+            for (auto& flag : m_flags) {
+                if (flag.state == FlagState::Carried && flag.carrierId == victim->id) {
+                    flag.state = FlagState::Dropped;
+                    flag.pos = victim->player.center();
+                    flag.carrierId = 0;
+                    flag.returnTimer = kFlagReturnTime;
+                    std::printf("[ot] flag (team %d) dropped at (%.1f %.1f %.1f)\n",
+                                flag.team, flag.pos.x, flag.pos.y, flag.pos.z);
+                    sendFlagState();
+                }
+            }
+        }
+
         respawn(victim);
+    }
+}
+
+void Server::sendFlagState() {
+    if (m_players.empty()) {
+        return;
+    }
+    PacketWriter writer;
+    writer.byte(static_cast<uint8_t>(MsgType::FlagState));
+    writer.byte(static_cast<uint8_t>(m_flags.size()));
+    for (const auto& flag : m_flags) {
+        writer.byte(static_cast<uint8_t>(flag.team));
+        writer.byte(static_cast<uint8_t>(flag.state));
+        writer.u32(flag.carrierId);
+        writer.f32(flag.pos.x);
+        writer.f32(flag.pos.y);
+        writer.f32(flag.pos.z);
+    }
+    writer.i16(static_cast<int16_t>(m_teamScore[0]));
+    writer.i16(static_cast<int16_t>(m_teamScore[1]));
+
+    ENetPacket* packet = enet_packet_create(writer.data(), writer.size(), ENET_PACKET_FLAG_RELIABLE);
+    enet_host_broadcast(m_host, 0, packet);
+    enet_host_flush(m_host);
+}
+
+void Server::updateFlags() {
+    bool changed = false;
+
+    // Auto-return dropped flags.
+    for (auto& flag : m_flags) {
+        if (flag.state == FlagState::Dropped) {
+            flag.returnTimer -= kTick;
+            if (flag.returnTimer <= 0.0f) {
+                flag.state = FlagState::Home;
+                flag.pos = flag.home;
+                std::printf("[ot] flag (team %d) returned home\n", flag.team);
+                changed = true;
+            }
+        }
+    }
+
+    for (auto& player : m_players) {
+        const glm::vec3& c = player->player.center();
+
+        // Touching your own flag (lying on the ground at your base) returns it.
+        for (auto& flag : m_flags) {
+            if (flag.team != player->team) {
+                continue;
+            }
+            if (flag.state != FlagState::Dropped) {
+                continue;
+            }
+            if (glm::length(c - flag.pos) > kFlagPickupRadius) {
+                continue;
+            }
+            flag.state = FlagState::Home;
+            flag.pos = flag.home;
+            flag.returnTimer = 0.0f;
+            std::printf("[ot] player %u returned own flag (team %d)\n",
+                        player->id, player->team);
+            changed = true;
+        }
+
+        if (!player->carryingFlag) {
+            // Pick up a Home/Dropped enemy flag when close to it.
+            for (auto& flag : m_flags) {
+                if (flag.team == player->team) {
+                    continue;
+                }
+                if (flag.state != FlagState::Home && flag.state != FlagState::Dropped) {
+                    continue;
+                }
+                if (glm::length(c - flag.pos) > kFlagPickupRadius) {
+                    continue;
+                }
+                flag.state = FlagState::Carried;
+                flag.carrierId = player->id;
+                player->carryingFlag = true;
+                std::printf("[ot] player %u picked up flag (team %d)\n",
+                            player->id, flag.team);
+                changed = true;
+                break;
+            }
+        } else {
+            // Capture: reach your own base while holding the enemy flag.
+            for (auto& flag : m_flags) {
+                if (flag.team != player->team) {
+                    continue;
+                }
+                if (glm::length(c - flag.home) > kFlagPickupRadius) {
+                    continue;
+                }
+                player->carryingFlag = false;
+                m_teamScore[player->team]++;
+                std::printf("[ot] TEAM %d SCORES (now %d)\n",
+                            player->team, m_teamScore[player->team]);
+
+                for (auto& f : m_flags) {
+                    f.state = FlagState::Home;
+                    f.pos = f.home;
+                    f.carrierId = 0;
+                }
+                changed = true;
+
+                if (m_teamScore[player->team] >= kScoreCap) {
+                    std::printf("[ot] TEAM %d WINS THE MATCH\n", player->team);
+                    m_teamScore[0] = 0;
+                    m_teamScore[1] = 0;
+                    for (auto& p : m_players) {
+                        p->carryingFlag = false;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    if (changed) {
+        sendFlagState();
     }
 }
 
@@ -376,6 +580,8 @@ void Server::sendSnapshots() {
             writer.f32(player->player.camera().pitch);
             writer.i16(static_cast<int16_t>(player->health));
             writer.i16(static_cast<int16_t>(player->score));
+            writer.byte(static_cast<uint8_t>(player->team));
+            writer.byte(player->carryingFlag ? 1 : 0);
         }
 
         ENetPacket* packet = enet_packet_create(writer.data(), writer.size(),
@@ -395,6 +601,7 @@ void Server::sendWelcome(ServerPlayer* player) {
     writer.f32(c.y);
     writer.f32(c.z);
     writer.f32(player->player.camera().yaw);
+    writer.byte(static_cast<uint8_t>(player->team));
 
     ENetPacket* packet = enet_packet_create(writer.data(), writer.size(), ENET_PACKET_FLAG_RELIABLE);
     enet_peer_send(player->peer, 0, packet);

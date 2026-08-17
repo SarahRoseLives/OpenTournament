@@ -134,6 +134,9 @@ void Client::handleEvent(const ENetEvent& event) {
                 case MsgType::MapChunk:
                     onMapChunk(reader);
                     break;
+                case MsgType::FlagState:
+                    onFlagState(reader);
+                    break;
                 default:
                     break;
             }
@@ -145,6 +148,10 @@ void Client::handleEvent(const ENetEvent& event) {
             SDL_Log("[ot] disconnected from server\n");
             m_connected = false;
             m_remote.clear();
+            m_flags.clear();
+            m_localCarrying = false;
+            m_teamScore[0] = 0;
+            m_teamScore[1] = 0;
             break;
 
         default:
@@ -191,12 +198,13 @@ void Client::onWelcome(PacketReader& reader) {
     const float y = reader.f32();
     const float z = reader.f32();
     const float yaw = reader.f32();
+    m_localTeam = static_cast<int>(reader.byte());
 
     m_player.setState(glm::vec3(x, y, z), yaw, 0.0f);
     m_history.clear();
     m_accumulator = 0.0f;
     m_connected = true;
-    SDL_Log("[ot] welcome, local id %u\n", m_localId);
+    SDL_Log("[ot] welcome, local id %u team %d\n", m_localId, m_localTeam);
 }
 
 void Client::onSnapshot(PacketReader& reader) {
@@ -217,6 +225,8 @@ void Client::onSnapshot(PacketReader& reader) {
         state.pitch = reader.f32();
         state.health = reader.i16();
         state.score = reader.i16();
+        state.team = reader.byte();
+        state.carrying = reader.byte();
         states.push_back(state);
     }
 
@@ -224,6 +234,8 @@ void Client::onSnapshot(PacketReader& reader) {
         if (state.id == m_localId) {
             m_localHealth = state.health;
             m_localScore = state.score;
+            m_localTeam = static_cast<int>(state.team);
+            m_localCarrying = state.carrying != 0;
             reconcile(state, lastAcked);
         } else {
             RemotePlayer* remote = nullptr;
@@ -235,7 +247,9 @@ void Client::onSnapshot(PacketReader& reader) {
             }
             if (!remote) {
                 m_remote.push_back(RemotePlayer{state.id, {}, {state.px, state.py, state.pz},
-                                                state.yaw, state.pitch, state.health, state.score});
+                                                state.yaw, state.pitch, state.health, state.score,
+                                                static_cast<int>(state.team),
+                                                state.carrying != 0});
                 remote = &m_remote.back();
             }
             remote->buffer.push_back({m_time, state});
@@ -278,6 +292,25 @@ void Client::onMapChunk(PacketReader& reader) {
     if (m_mapText.size() >= m_mapTotal) {
         m_mapReady = true;
         SDL_Log("[ot] received map (%zu bytes)\n", m_mapText.size());
+    }
+}
+
+void Client::onFlagState(PacketReader& reader) {
+    const uint8_t count = reader.byte();
+    m_flags.clear();
+    for (int i = 0; i < count && reader.ok(); ++i) {
+        RemoteFlag flag;
+        flag.team = static_cast<int>(reader.byte());
+        flag.state = static_cast<FlagState>(reader.byte());
+        flag.carrierId = reader.u32();
+        flag.pos.x = reader.f32();
+        flag.pos.y = reader.f32();
+        flag.pos.z = reader.f32();
+        m_flags.push_back(flag);
+    }
+    if (reader.ok()) {
+        m_teamScore[0] = reader.i16();
+        m_teamScore[1] = reader.i16();
     }
 }
 
@@ -338,6 +371,8 @@ void Client::interpolate() {
             remote.pitch = a->pitch;
             remote.health = b->health;
             remote.score = b->score;
+            remote.team = static_cast<int>(b->team);
+            remote.carrying = b->carrying != 0;
         }
     }
 }

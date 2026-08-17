@@ -172,6 +172,105 @@ const glm::vec3 kPlayerColors[8] = {
     {1.0f, 0.30f, 1.0f}, {0.30f, 1.0f, 1.0f}, {1.0f, 0.60f, 0.20f}, {0.60f, 0.40f, 1.0f},
 };
 
+const glm::vec3 kTeamColors[2] = {
+    {1.0f, 0.25f, 0.25f},  // red
+    {0.25f, 0.45f, 1.0f},  // blue
+};
+
+// Small world-space box (8-float vertex layout) used for dynamic flag markers.
+void pushBox3D(std::vector<float>& verts, const glm::vec3& min, const glm::vec3& max,
+               const glm::vec3& color) {
+    const glm::vec3 c0(min.x, min.y, min.z);
+    const glm::vec3 c1(max.x, min.y, min.z);
+    const glm::vec3 c2(max.x, max.y, min.z);
+    const glm::vec3 c3(min.x, max.y, min.z);
+    const glm::vec3 c4(min.x, min.y, max.z);
+    const glm::vec3 c5(max.x, min.y, max.z);
+    const glm::vec3 c6(max.x, max.y, max.z);
+    const glm::vec3 c7(min.x, max.y, max.z);
+    const glm::vec3 corners[8] = {c0, c1, c2, c3, c4, c5, c6, c7};
+    auto tri = [&](int ia, int ib, int ic) {
+        for (const int i : {ia, ib, ic}) {
+            verts.insert(verts.end(), {corners[i].x, corners[i].y, corners[i].z,
+                                       0.0f, 0.0f, color.r, color.g, color.b});
+        }
+    };
+    tri(0, 3, 2); tri(0, 2, 1);  // bottom
+    tri(4, 5, 6); tri(4, 6, 7);  // top
+    tri(0, 1, 5); tri(0, 5, 4);  // front
+    tri(1, 2, 6); tri(1, 6, 5);  // right
+    tri(2, 3, 7); tri(2, 7, 6);  // back
+    tri(3, 0, 4); tri(3, 4, 7);  // left
+}
+
+std::vector<float> buildFlagMarkers(
+    const std::vector<ot::RemoteFlag>& flags,
+    const std::vector<ot::RemotePlayer>& remotes,
+    const glm::vec3& localCenter, bool localCarrying) {
+    std::vector<float> v;
+    const float size = 40.0f;
+    for (const auto& flag : flags) {
+        const glm::vec3 color = kTeamColors[flag.team < 2 ? flag.team : 0];
+        glm::vec3 at;
+        bool show = false;
+        if (flag.state == ot::net::FlagState::Carried) {
+            if (flag.carrierId != 0) {
+                const float* c = nullptr;
+                for (const auto& rp : remotes) {
+                    if (rp.id == flag.carrierId) {
+                        c = &rp.position.x;
+                        break;
+                    }
+                }
+                if (c) {
+                    at = glm::vec3(c[0], c[1], c[2]) + glm::vec3(0.0f, ot::Player::kHalfHeight * 2.0f, 0.0f);
+                    show = true;
+                }
+            } else if (localCarrying) {
+                at = localCenter + glm::vec3(0.0f, ot::Player::kHalfHeight * 2.0f, 0.0f);
+                show = true;
+            }
+        } else if (flag.state == ot::net::FlagState::Dropped) {
+            at = flag.pos + glm::vec3(0.0f, 30.0f, 0.0f);
+            show = true;
+        }
+        if (show) {
+            pushBox3D(v, at - glm::vec3(size * 0.5f), at + glm::vec3(size * 0.5f), color);
+        }
+    }
+    return v;
+}
+
+std::vector<float> buildCtfHud(int score0, int score1, int localTeam,
+                               bool localCarrying, bool enemyCarriesMine) {
+    std::vector<float> v;
+    const float scale = 0.08f;
+    const std::string redScore = "RED " + std::to_string(score0);
+    const std::string blueScore = "BLUE " + std::to_string(score1);
+    const std::string gap = "   ";
+    const std::string combined = redScore + gap + blueScore;
+    const float cx = -ot::textWidth(combined, scale) * 0.5f;
+    ot::buildText(v, redScore, cx, 0.92f, scale, kTeamColors[0]);
+    const float redW = ot::textWidth(redScore, scale);
+    const float gapW = ot::textWidth(gap, scale);
+    ot::buildText(v, blueScore, cx + redW + gapW, 0.92f, scale, kTeamColors[1]);
+
+    const glm::vec3 warnColor(1.0f, 0.85f, 0.2f);
+    const glm::vec3 redColor(1.0f, 0.3f, 0.3f);
+    const float bannerScale = 0.1f;
+    if (localCarrying) {
+        const std::string msg = "YOU HAVE THE FLAG!";
+        ot::buildText(v, msg, -ot::textWidth(msg, bannerScale) * 0.5f, 0.45f,
+                      bannerScale, warnColor);
+    } else if (enemyCarriesMine) {
+        const std::string msg = "ENEMY HAS YOUR FLAG!";
+        ot::buildText(v, msg, -ot::textWidth(msg, bannerScale) * 0.5f, 0.45f,
+                      bannerScale, redColor);
+    }
+    (void)localTeam;
+    return v;
+}
+
 std::string readServerIpFile() {
 #if OT_PLATFORM_ANDROID
     const char* ext = SDL_AndroidGetExternalStoragePath();
@@ -962,10 +1061,20 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
         remoteBoxes.push_back(mesh);
     }
 
+    std::vector<ot::Mesh> teamBoxes;
+    for (int i = 0; i < 2; ++i) {
+        ot::Mesh mesh;
+        mesh.upload(buildCenteredBox(ot::Player::kHalfWidth, ot::Player::kHalfHeight,
+                                     ot::Player::kHalfWidth, kTeamColors[i]));
+        teamBoxes.push_back(mesh);
+    }
+
     ot::Mesh crosshairMesh;
     ot::Mesh tracerMesh;
     ot::Mesh hudMesh;
     ot::Mesh weaponBarMesh;
+    ot::Mesh flagMarkerMesh;
+    ot::Mesh ctfHudMesh;
 
     const float baseFov = glm::radians(70.0f);
     const float aimFov = glm::radians(45.0f);
@@ -1087,13 +1196,28 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
         }
 
         if (isClient) {
+            const bool ctf = !client.flags().empty();
             for (const auto& remote : client.remotePlayers()) {
                 if (remote.id == 0 || remote.id == client.localId()) {
                     continue;
                 }
-                const uint32_t idx = (remote.id - 1) % 8;
                 const glm::mat4 model = glm::translate(glm::mat4(1.0f), remote.position);
-                renderer.draw(remoteBoxes[idx], viewProj * model);
+                if (ctf && remote.team >= 0 && remote.team < 2) {
+                    renderer.draw(teamBoxes[remote.team], viewProj * model);
+                } else {
+                    const uint32_t idx = (remote.id - 1) % 8;
+                    renderer.draw(remoteBoxes[idx], viewProj * model);
+                }
+            }
+
+            // Dynamic CTF flag markers (carried/dropped flags).
+            if (ctf) {
+                const glm::vec3 localCenter = player.center();
+                flagMarkerMesh.upload(buildFlagMarkers(client.flags(), client.remotePlayers(),
+                                                       localCenter, client.localCarrying()));
+                if (!flagMarkerMesh.empty()) {
+                    renderer.draw(flagMarkerMesh, viewProj);
+                }
             }
         }
 
@@ -1122,6 +1246,21 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
                                    static_cast<float>(ot::net::kMaxHealth);
             hudMesh.upload(buildHealthBar(fraction));
             renderer.drawOverlay(hudMesh);
+
+            // CTF scoreboard + flag banners.
+            if (!client.flags().empty()) {
+                bool enemyCarriesMine = false;
+                for (const auto& flag : client.flags()) {
+                    if (flag.team == client.localTeam() &&
+                        flag.state == ot::net::FlagState::Carried) {
+                        enemyCarriesMine = true;
+                    }
+                }
+                ctfHudMesh.upload(buildCtfHud(client.teamScore(0), client.teamScore(1),
+                                              client.localTeam(), client.localCarrying(),
+                                              enemyCarriesMine));
+                renderer.drawOverlay(ctfHudMesh);
+            }
         }
 
         weaponBarMesh.upload(buildWeaponBar(selectedWeapon));
@@ -1134,10 +1273,15 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
     for (auto& mesh : remoteBoxes) {
         mesh.destroy();
     }
+    for (auto& mesh : teamBoxes) {
+        mesh.destroy();
+    }
     crosshairMesh.destroy();
     tracerMesh.destroy();
     hudMesh.destroy();
     weaponBarMesh.destroy();
+    flagMarkerMesh.destroy();
+    ctfHudMesh.destroy();
     level.destroy();
     input.shutdown();
     renderer.shutdown();

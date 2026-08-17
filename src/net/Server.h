@@ -42,6 +42,17 @@ private:
         int health = kMaxHealth;
         int score = 0;
         uint32_t lastAckedInput = 0;
+        int team = 0;
+        bool carryingFlag = false;
+    };
+
+    struct ServerFlag {
+        int team = 0;
+        glm::vec3 home{0.0f};
+        FlagState state = FlagState::Home;
+        glm::vec3 pos{0.0f};
+        uint32_t carrierId = 0;
+        float returnTimer = 0.0f;
     };
 
     void step();
@@ -52,10 +63,13 @@ private:
     void removePlayer(ServerPlayer* player);
     void respawn(ServerPlayer* player);
     void shoot(ServerPlayer& shooter);
+    void updateFlags();
     void sendSnapshots();
     void sendWelcome(ServerPlayer* player);
     void sendMapData(ServerPlayer* player);
+    void sendFlagState();
     glm::vec3 spawnPointForId(uint32_t id) const;
+    glm::vec3 spawnForPlayer(const ServerPlayer& player) const;
     float spawnYawForId(uint32_t id) const;
 
     ENetHost* m_host = nullptr;
@@ -66,9 +80,14 @@ private:
     std::vector<glm::vec3> m_spawns;
     std::vector<float> m_spawnYaws;
 
+    bool m_ctf = false;
+    std::vector<ServerFlag> m_flags;
+    int m_teamScore[2] = {0, 0};
+
     uint32_t m_nextId = 1;
     uint32_t m_tick = 0;
     int m_ticksSinceSnapshot = 0;
+    int m_ticksSinceFlagState = 0;
     float m_accumulator = 0.0f;
 };
 

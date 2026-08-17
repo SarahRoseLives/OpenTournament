@@ -26,9 +26,21 @@ enum class MsgType : uint8_t {
     PlayerLeft = 4,
     MapData = 5,
     MapChunk = 6,
+    FlagState = 7,
 };
 
 constexpr uint32_t kMapChunkSize = 32 * 1024;
+
+// CTF flag state bits (FlagState message).
+enum class FlagState : uint8_t {
+    Home = 0,     // sitting on its base
+    Carried = 1,  // being carried by a player
+    Dropped = 2,  // lying on the ground awaiting return
+};
+
+constexpr int kScoreCap = 5;
+constexpr float kFlagReturnTime = 30.0f;
+constexpr float kFlagPickupRadius = 100.0f;
 
 struct PlayerState {
     uint32_t id = 0;
@@ -39,6 +51,8 @@ struct PlayerState {
     float pitch = 0.0f;
     int16_t health = static_cast<int16_t>(kMaxHealth);
     int16_t score = 0;
+    uint8_t team = 0;
+    uint8_t carrying = 0;  // 1 if carrying the enemy flag
 };
 
 // Little-endian byte writer (both target platforms are little-endian).
