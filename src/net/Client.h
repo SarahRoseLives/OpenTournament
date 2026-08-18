@@ -33,6 +33,7 @@ struct RemotePlayer {
     int score = 0;
     int team = 0;
     bool carrying = false;
+    float speed = 0.0f;  // horizontal speed, used for animation
 };
 
 struct RemoteFlag {
@@ -85,7 +86,7 @@ private:
     void onMapChunk(PacketReader& reader);
     void onFlagState(PacketReader& reader);
     void reconcile(const PlayerState& state, uint32_t lastAcked);
-    void interpolate();
+    void interpolate(float dt);
 
     Player& m_player;
     ICollisionWorld* m_world = nullptr;

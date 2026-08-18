@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -83,6 +84,101 @@ std::vector<float> buildCenteredBox(float hx, float hy, float hz, const glm::vec
     pushQuad(v, c3, c7, c6, c2, color);
     pushQuad(v, c0, c1, c5, c4, color * 0.5f);
     return v;
+}
+
+void pushBoxRotated(std::vector<float>& verts,
+                    float hx, float hy, float hz,
+                    const glm::vec3& offset,
+                    float yaw, const glm::vec3& pos,
+                    const glm::vec3& color) {
+    const float cp = std::cos(yaw);
+    const float sp = std::sin(yaw);
+    auto rot = [&](float lx, float ly, float lz) -> glm::vec3 {
+        const float x = lx + offset.x;
+        const float z = lz + offset.z;
+        return glm::vec3(pos.x + x * cp + z * sp,
+                         pos.y + ly + offset.y,
+                         pos.z - x * sp + z * cp);
+    };
+    const glm::vec3 c0 = rot(-hx, -hy, -hz);
+    const glm::vec3 c1 = rot( hx, -hy, -hz);
+    const glm::vec3 c2 = rot( hx,  hy, -hz);
+    const glm::vec3 c3 = rot(-hx,  hy, -hz);
+    const glm::vec3 c4 = rot(-hx, -hy,  hz);
+    const glm::vec3 c5 = rot( hx, -hy,  hz);
+    const glm::vec3 c6 = rot( hx,  hy,  hz);
+    const glm::vec3 c7 = rot(-hx,  hy,  hz);
+    const glm::vec3 side = color * 0.8f;
+    pushQuad(verts, c0, c3, c2, c1, side);
+    pushQuad(verts, c5, c6, c7, c4, side);
+    pushQuad(verts, c4, c7, c3, c0, side);
+    pushQuad(verts, c1, c2, c6, c5, side);
+    pushQuad(verts, c3, c7, c6, c2, color);
+    pushQuad(verts, c0, c1, c5, c4, color * 0.5f);
+}
+
+void buildHumanoid(std::vector<float>& verts, const glm::vec3& pos,
+                   float yaw, const glm::vec3& bodyColor,
+                   const glm::vec3& skinColor, const glm::vec3& visorColor,
+                   float swingAngle) {
+    const float sa = std::sin(swingAngle);
+    const float ca = std::cos(swingAngle);
+
+    pushBoxRotated(verts, 14.0f, 12.0f, 14.0f,
+                   glm::vec3(0.0f, 32.0f, 0.0f), yaw, pos, skinColor);
+
+    pushBoxRotated(verts, 5.0f, 6.0f, 2.0f,
+                   glm::vec3(0.0f, 34.0f, -13.0f), yaw, pos, visorColor);
+
+    pushBoxRotated(verts, 20.0f, 14.0f, 12.0f,
+                   glm::vec3(0.0f, 6.0f, 0.0f), yaw, pos, bodyColor);
+
+    const glm::vec3 beltColor = bodyColor * 0.6f;
+    pushBoxRotated(verts, 19.0f, 2.0f, 11.0f,
+                   glm::vec3(0.0f, -9.0f, 0.0f), yaw, pos, beltColor);
+
+    const float legPivotY = -8.0f;
+    const float legH = 18.0f;
+    const float legCx = 8.0f;
+    const float legOy = legPivotY - legH;
+    {
+        const float offX = -legCx;
+        const float offZ = -legH * sa;
+        const float offY = legOy + legH * (1.0f - ca);
+        pushBoxRotated(verts, 8.0f, legH, 9.0f,
+                       glm::vec3(offX, offY, offZ), yaw, pos, bodyColor);
+    }
+    {
+        const float offX = legCx;
+        const float offZ = legH * sa;
+        const float offY = legOy + legH * (1.0f - ca);
+        pushBoxRotated(verts, 8.0f, legH, 9.0f,
+                       glm::vec3(offX, offY, offZ), yaw, pos, bodyColor);
+    }
+
+    const float armPivotY = 14.0f;
+    const float armH = 12.0f;
+    const float armCx = 27.0f;
+    const float armOy = armPivotY - armH;
+    {
+        const float offX = -armCx;
+        const float offZ = -armH * sa;
+        const float offY = armOy + armH * (1.0f - ca);
+        pushBoxRotated(verts, 7.0f, armH, 7.0f,
+                       glm::vec3(offX, offY, offZ), yaw, pos, bodyColor);
+    }
+    {
+        const float offX = armCx;
+        const float offZ = armH * sa;
+        const float offY = armOy + armH * (1.0f - ca);
+        pushBoxRotated(verts, 7.0f, armH, 7.0f,
+                       glm::vec3(offX, offY, offZ), yaw, pos, bodyColor);
+    }
+
+    pushBoxRotated(verts, 5.0f, 2.0f, 6.0f,
+                   glm::vec3(-10.0f, -44.0f, -2.0f), yaw, pos, glm::vec3(0.25f, 0.22f, 0.20f));
+    pushBoxRotated(verts, 5.0f, 2.0f, 6.0f,
+                   glm::vec3(10.0f, -44.0f, -2.0f), yaw, pos, glm::vec3(0.25f, 0.22f, 0.20f));
 }
 
 void pushQuad2D(std::vector<float>& v, float x0, float y0, float x1, float y1,
@@ -1053,28 +1149,14 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
         SDL_Log("[ot] client mode, server host resolved: %s:%u", host.c_str(), port);
     }
 
-    std::vector<ot::Mesh> remoteBoxes;
-    for (int i = 0; i < 8; ++i) {
-        ot::Mesh mesh;
-        mesh.upload(buildCenteredBox(ot::Player::kHalfWidth, ot::Player::kHalfHeight,
-                                     ot::Player::kHalfWidth, kPlayerColors[i]));
-        remoteBoxes.push_back(mesh);
-    }
-
-    std::vector<ot::Mesh> teamBoxes;
-    for (int i = 0; i < 2; ++i) {
-        ot::Mesh mesh;
-        mesh.upload(buildCenteredBox(ot::Player::kHalfWidth, ot::Player::kHalfHeight,
-                                     ot::Player::kHalfWidth, kTeamColors[i]));
-        teamBoxes.push_back(mesh);
-    }
-
     ot::Mesh crosshairMesh;
     ot::Mesh tracerMesh;
     ot::Mesh hudMesh;
     ot::Mesh weaponBarMesh;
     ot::Mesh flagMarkerMesh;
     ot::Mesh ctfHudMesh;
+    ot::Mesh humanoidMesh;
+    float animTime = 0.0f;
 
     const float baseFov = glm::radians(70.0f);
     const float aimFov = glm::radians(45.0f);
@@ -1197,20 +1279,29 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
 
         if (isClient) {
             const bool ctf = !client.flags().empty();
+            animTime += dt;
+
+            std::vector<float> humanVerts;
             for (const auto& remote : client.remotePlayers()) {
                 if (remote.id == 0 || remote.id == client.localId()) {
                     continue;
                 }
-                const glm::mat4 model = glm::translate(glm::mat4(1.0f), remote.position);
-                if (ctf && remote.team >= 0 && remote.team < 2) {
-                    renderer.draw(teamBoxes[remote.team], viewProj * model);
-                } else {
-                    const uint32_t idx = (remote.id - 1) % 8;
-                    renderer.draw(remoteBoxes[idx], viewProj * model);
-                }
+                const glm::vec3 bodyColor = (ctf && remote.team >= 0 && remote.team < 2)
+                    ? kTeamColors[remote.team]
+                    : kPlayerColors[(remote.id - 1) % 8];
+                const glm::vec3 skinColor(0.85f, 0.72f, 0.60f);
+                const glm::vec3 visorColor(0.15f, 0.60f, 0.85f);
+                const float swingSpeed = 8.0f;
+                const float swingAmp = std::min(remote.speed * 0.003f, 0.8f);
+                const float swing = swingAmp * std::sin(animTime * swingSpeed);
+                buildHumanoid(humanVerts, remote.position, remote.yaw,
+                              bodyColor, skinColor, visorColor, swing);
+            }
+            humanoidMesh.upload(humanVerts);
+            if (!humanoidMesh.empty()) {
+                renderer.draw(humanoidMesh, viewProj);
             }
 
-            // Dynamic CTF flag markers (carried/dropped flags).
             if (ctf) {
                 const glm::vec3 localCenter = player.center();
                 flagMarkerMesh.upload(buildFlagMarkers(client.flags(), client.remotePlayers(),
@@ -1270,18 +1361,13 @@ int runGame(const std::string& serverHostArg, uint16_t port, const std::string& 
     }
 
     client.disconnect();
-    for (auto& mesh : remoteBoxes) {
-        mesh.destroy();
-    }
-    for (auto& mesh : teamBoxes) {
-        mesh.destroy();
-    }
     crosshairMesh.destroy();
     tracerMesh.destroy();
     hudMesh.destroy();
     weaponBarMesh.destroy();
     flagMarkerMesh.destroy();
     ctfHudMesh.destroy();
+    humanoidMesh.destroy();
     level.destroy();
     input.shutdown();
     renderer.shutdown();

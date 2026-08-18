@@ -105,7 +105,7 @@ void Client::update(float dt, const PlayerInput& baseInput, ICollisionWorld& wor
         m_accumulator -= kTick;
     }
 
-    interpolate();
+    interpolate(dt);
 }
 
 void Client::handleEvent(const ENetEvent& event) {
@@ -333,7 +333,7 @@ void Client::reconcile(const PlayerState& state, uint32_t lastAcked) {
     m_history.erase(m_history.begin(), std::next(it));
 }
 
-void Client::interpolate() {
+void Client::interpolate(float dt) {
     const double renderTime = m_time - kInterpDelay;
 
     for (auto& remote : m_remote) {
@@ -363,10 +363,14 @@ void Client::interpolate() {
         }
 
         if (a && b) {
-            remote.position = glm::vec3(
+            const glm::vec3 newPos(
                 glm::mix(a->px, b->px, alpha),
                 glm::mix(a->py, b->py, alpha),
                 glm::mix(a->pz, b->pz, alpha));
+            const glm::vec3 diff = newPos - remote.position;
+            const float hDist = std::sqrt(diff.x * diff.x + diff.z * diff.z);
+            remote.speed = hDist > 0.01f ? hDist / std::max(dt, 1e-6f) : 0.0f;
+            remote.position = newPos;
             remote.yaw = a->yaw;
             remote.pitch = a->pitch;
             remote.health = b->health;
