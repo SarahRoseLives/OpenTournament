@@ -11,7 +11,7 @@ public:
     float pitch = 0.0f;  // radians, positive = looking up
     float fov = glm::radians(70.0f);
     float aspect = 1.0f;
-    float zNear = 0.1f;
+    float zNear = 4.0f;
     float zFar = 20000.0f;
 
     glm::vec3 forward() const;

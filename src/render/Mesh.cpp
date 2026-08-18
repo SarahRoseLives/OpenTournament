@@ -22,16 +22,18 @@ void configureAttributes() {
 void Mesh::upload(const std::vector<float>& vertices) {
     m_vertexCount = static_cast<int>(vertices.size() / 8);
 
-    glGenVertexArrays(1, &m_vao);
+    // Reuse existing buffers on re-upload (these are called every frame for
+    // dynamic meshes); allocating a new VAO/VBO each call leaks GPU memory.
+    if (m_vao == 0) {
+        glGenVertexArrays(1, &m_vao);
+        glGenBuffers(1, &m_vbo);
+    }
     glBindVertexArray(m_vao);
-
-    glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    configureAttributes();
     glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
                  vertices.data(), GL_STATIC_DRAW);
-
-    configureAttributes();
 
     glBindVertexArray(0);
 }
@@ -39,16 +41,16 @@ void Mesh::upload(const std::vector<float>& vertices) {
 void Mesh::uploadLines(const std::vector<float>& vertices) {
     m_lineCount = static_cast<int>(vertices.size() / 8);
 
-    glGenVertexArrays(1, &m_lineVao);
+    if (m_lineVao == 0) {
+        glGenVertexArrays(1, &m_lineVao);
+        glGenBuffers(1, &m_lineVbo);
+    }
     glBindVertexArray(m_lineVao);
-
-    glGenBuffers(1, &m_lineVbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
+    configureAttributes();
     glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
                  vertices.data(), GL_DYNAMIC_DRAW);
-
-    configureAttributes();
 
     glBindVertexArray(0);
 }
